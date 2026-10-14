@@ -1,35 +1,29 @@
 <!DOCTYPE html>
-<html lang="en" style="width:100%; height:100%; overflow:hidden; background-color:#0d0d0d; color:#e0e0e0; font-family:sans-serif;">
+<html lang="en" style="width:100%; height:100%; overflow:hidden; background-color:#050505; color:#e0e0e0; font-family:sans-serif;">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebForge 1.20.1 - Maximum Optimization</title>
+    <title>WebForge 1.20.1 - Maximum Overdrive</title>
     <link rel="icon" type="image/x-icon" href="./favicon.ico">
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
       body { margin: 0; width: 100%; height: 100%; display: flex; flex-direction: column; }
       #launcher-menu {
-        padding: 15px 25px;
-        background: #1a1a1a;
-        border-bottom: 2px solid #333;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-        z-index: 10;
+        padding: 15px 25px; background: #111; border-bottom: 2px solid #2a2a2a;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.8); z-index: 10;
       }
       .btn {
         padding: 10px 18px; margin-top: 10px; cursor: pointer;
-        background: #00e676; color: #000; font-weight: 800;
-        border: none; border-radius: 4px; font-size: 14px;
+        background: #00e676; color: #000; font-weight: 800; border: none; border-radius: 4px;
         transition: background 0.2s;
       }
       .btn:hover:not(:disabled) { background: #00c853; }
-      .btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+      .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
       .input-field {
-        background: #2a2a2a; border: 1px solid #444; color: #fff;
+        background: #222; border: 1px solid #444; color: #fff;
         padding: 6px 10px; border-radius: 4px;
       }
       #status { margin-top: 12px; font-size: 13px; color: #b9f6ca; font-family: monospace; }
-      
-      /* Diagnostic Console */
       #console-container {
         flex: 1; background: #000; color: #00ff66;
         font-family: 'Courier New', Courier, monospace; font-size: 12px;
@@ -37,15 +31,14 @@
       }
       .log-info { color: #00e676; }
       .log-warn { color: #ffab00; }
-      .log-err { color: #ff1744; font-weight: bold; background: rgba(255, 23, 68, 0.1); display: inline-block; width: 100%; }
-      
+      .log-err { color: #ff1744; font-weight: bold; }
       #game-container { display: none; width: 100%; height: 100%; background: #000; }
     </style>
   </head>
   <body>
 
     <div id="launcher-menu">
-      <h2 style="margin-top: 0; color: #fff;">WebForge Engine Probe (1.20.1)</h2>
+      <h2 style="margin-top: 0; color: #fff;">WebForge 1.20.1 Probe (In-Memory Mount)</h2>
 
       <div style="margin-bottom: 15px;">
         <label for="username-input" style="font-size: 14px;">Username: </label>
@@ -53,18 +46,18 @@
       </div>
 
       <div>
-        <label style="font-size: 14px;"><strong>Execution Target:</strong></label>
+        <label style="font-size: 14px;"><strong>Target Mode:</strong></label>
         <select id="target-mode" class="input-field" style="margin-left: 5px;">
-          <option value="forge">Forge 1.20.1 Bootstrap (Heavy)</option>
-          <option value="vanilla">Vanilla 1.20.1 Client (Direct LWJGL Probe)</option>
+          <option value="forge">Forge 1.20.1 (Bootstrap Loader)</option>
+          <option value="vanilla">Vanilla 1.20.1 (Direct Main)</option>
         </select>
       </div>
 
-      <button id="start-btn" class="btn" disabled>Initialize 1.20.1 Execution</button>
-      <div id="status">Awaiting CheerpJ 4.2 JRE 17 load...</div>
+      <button id="start-btn" class="btn" disabled>Fetch Binaries & Initialize JVM</button>
+      <div id="status">Awaiting CheerpJ 4.2 Engine...</div>
     </div>
 
-    <!-- Live execution trace -->
+    <!-- Diagnostic Terminal -->
     <div id="console-container"></div>
 
     <div id="game-container">
@@ -78,19 +71,16 @@
       const targetMode = document.getElementById("target-mode");
       const usernameInput = document.getElementById("username-input");
 
-      // High-performance logger to prevent DOM stalling
       function log(msg, type = "info") {
         const div = document.createElement("div");
         div.className = `log-${type}`;
         div.textContent = `[${new Date().toISOString().split('T')[1].slice(0,-1)}] ${msg}`;
         consoleBox.appendChild(div);
-        // Only auto-scroll if near the bottom to save CPU cycles
         if (consoleBox.scrollHeight - consoleBox.scrollTop < 600) {
           consoleBox.scrollTop = consoleBox.scrollHeight;
         }
       }
 
-      // Intercept browser console
       const origLog = console.log; const origWarn = console.warn; const origErr = console.error;
       console.log = (...args) => { log(args.join(" "), "info"); origLog(...args); };
       console.warn = (...args) => { log(args.join(" "), "warn"); origWarn(...args); };
@@ -98,30 +88,48 @@
 
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
-      // Initialize JVM with aggressive optimizations
       try {
-        log("Booting OpenJDK 17 with maximum browser optimizations...");
+        log("Booting OpenJDK 17 with aggressive optimization flags...");
         await cheerpjInit({
           version: 17,
-          status: "none", // Disable default UI to save DOM renders
-          disableMetrics: true,
+          status: "none", // Disable DOM overlay updates
+          disableMetrics: true, // Cut telemetry overhead
           javaProperties: [
             `java.library.path=${nativesPath}`,
             "org.lwjgl.util.NoChecks=true",
             "fml.ignoreInvalidMinecraftCertificates=true",
-            "sun.java2d.opengl=true", // Hint Java to use GL pipeline if possible
-            "cheerpj.disableMetrics=true"
+            "sun.java2d.opengl=true",
+            "java.awt.headless=false"
           ]
         });
 
-        statusText.innerText = "JVM 17 Ready. Awaiting launch command.";
-        statusText.style.color = "#00e676";
-        log("CheerpJ initialization complete.");
+        statusText.innerText = "JVM 17 Ready. Waiting for launch.";
+        log("CheerpJ JRE 17 Initialization Complete.");
         startBtn.disabled = false;
       } catch (e) {
         log(`CRITICAL INIT FAILURE: ${e.message || e}`, "err");
-        statusText.innerText = "Initialization failed. Check logs.";
+        statusText.innerText = "JVM Init Failed. Check logs.";
         statusText.style.color = "#ff1744";
+      }
+
+      // Helper to fetch files via JS and push directly into CheerpJ's /str/ filesystem
+      async function downloadAndMount(filename) {
+        log(`Fetching ${filename} via network...`);
+        try {
+          const response = await fetch(`./${filename}`);
+          if (!response.ok) throw new Error(`HTTP ${response.status} - File missing or CORS blocked.`);
+          
+          const buffer = await response.arrayBuffer();
+          const view = new Uint8Array(buffer);
+          
+          log(`Loaded ${filename} (${(view.byteLength / 1024 / 1024).toFixed(2)} MB). Injecting to /str/${filename}...`);
+          // cheerpOSAddStringFile accepts Uint8Array in CheerpJ 3/4
+          cheerpOSAddStringFile(`/str/${filename}`, view);
+          return `/str/${filename}`;
+        } catch (err) {
+          log(`Failed to fetch ${filename}: ${err.message}`, "err");
+          throw err;
+        }
       }
 
       startBtn.addEventListener("click", async () => {
@@ -132,19 +140,28 @@
         log(`--> Triggering execution sequence for: ${mode.toUpperCase()}`);
 
         try {
+          // 1. Manually download and mount the JARs into memory
+          // This bypasses the CheerpJ /app/ web-server 404 issue entirely
+          const clientPath = await downloadAndMount("minecraft-1.20.1-client.jar");
+          
+          let classpath = clientPath;
+          if (mode === "forge") {
+            const forgePath = await downloadAndMount("forge-1.20.1-47.4.28-universal.jar");
+            classpath = `${forgePath}:${clientPath}`;
+          }
+
+          // 2. Launch the JVM Main Class
+          log(`Executing JVM with classpath: ${classpath}`);
           if (mode === "vanilla") {
-            log("Mounting /app/minecraft-1.20.1-client.jar...");
             await cheerpjRunMain(
               "net.minecraft.client.main.Main",
-              "/app/minecraft-1.20.1-client.jar",
+              classpath,
               "--version", "1.20.1",
               "--username", username,
               "--gameDir", "/files/game",
               "--assetsDir", "/files/assets"
             );
           } else {
-            log("Mounting ForgeBootstrap and resolving module pathways...");
-            const classpath = "/app/forge-1.20.1-47.4.28-universal.jar:/app/minecraft-1.20.1-client.jar";
             await cheerpjRunMain(
               "net.minecraftforge.bootstrap.ForgeBootstrap",
               classpath,
@@ -155,11 +172,11 @@
             );
           }
         } catch (err) {
-          log(`FATAL EXCEPTION: ${err.message || err}`, "err");
+          log(`FATAL EXCEPTION / HALT: ${err.message || err}`, "err");
           if (err.stack) log(err.stack, "err");
-          statusText.innerText = "Execution halted. See console trace.";
+          statusText.innerText = "Execution Halted. See Console.";
           statusText.style.color = "#ff1744";
-          startBtn.disabled = false; // Allow re-attempt
+          startBtn.disabled = false;
         }
       });
     </script>
