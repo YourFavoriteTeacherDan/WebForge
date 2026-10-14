@@ -1,89 +1,71 @@
 <!DOCTYPE html>
-<html lang="en" style="width:100%;height:100%;overflow:hidden;background-color:#121212;color:#eee;font-family:sans-serif;">
+<html lang="en" style="width:100%; height:100%; overflow:hidden; background-color:#0d0d0d; color:#e0e0e0; font-family:sans-serif;">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebForge 1.20.1 Probe</title>
+    <title>WebForge 1.20.1 - Maximum Optimization</title>
     <link rel="icon" type="image/x-icon" href="./favicon.ico">
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
-      body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-      }
+      body { margin: 0; width: 100%; height: 100%; display: flex; flex-direction: column; }
       #launcher-menu {
-        padding: 20px;
-        background: #1e1e1e;
+        padding: 15px 25px;
+        background: #1a1a1a;
         border-bottom: 2px solid #333;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        z-index: 10;
       }
-      #launcher-menu button {
-        padding: 10px 20px;
-        margin-top: 10px;
-        cursor: pointer;
-        background: #4CAF50;
-        color: black;
-        font-weight: bold;
-        border: none;
-        border-radius: 4px;
-        font-size: 15px;
+      .btn {
+        padding: 10px 18px; margin-top: 10px; cursor: pointer;
+        background: #00e676; color: #000; font-weight: 800;
+        border: none; border-radius: 4px; font-size: 14px;
+        transition: background 0.2s;
       }
-      #launcher-menu button:disabled {
-        background: #555;
-        cursor: not-allowed;
+      .btn:hover:not(:disabled) { background: #00c853; }
+      .btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+      .input-field {
+        background: #2a2a2a; border: 1px solid #444; color: #fff;
+        padding: 6px 10px; border-radius: 4px;
       }
-      #status {
-        margin-top: 10px;
-        font-size: 14px;
-        color: #81c784;
-      }
+      #status { margin-top: 12px; font-size: 13px; color: #b9f6ca; font-family: monospace; }
+      
+      /* Diagnostic Console */
       #console-container {
-        flex: 1;
-        background: #000;
-        color: #00ff66;
-        font-family: monospace;
-        font-size: 13px;
-        padding: 15px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        box-sizing: border-box;
+        flex: 1; background: #000; color: #00ff66;
+        font-family: 'Courier New', Courier, monospace; font-size: 12px;
+        padding: 15px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;
       }
-      .log-err { color: #ff5252; }
-      .log-warn { color: #ffb74d; }
-      #game-container {
-        display: none;
-        width: 100%;
-        height: 100%;
-      }
+      .log-info { color: #00e676; }
+      .log-warn { color: #ffab00; }
+      .log-err { color: #ff1744; font-weight: bold; background: rgba(255, 23, 68, 0.1); display: inline-block; width: 100%; }
+      
+      #game-container { display: none; width: 100%; height: 100%; background: #000; }
     </style>
   </head>
   <body>
 
     <div id="launcher-menu">
-      <h2>WebForge 1.20.1 Diagnostics (LWJGL 2 / CheerpJ 4.2)</h2>
+      <h2 style="margin-top: 0; color: #fff;">WebForge Engine Probe (1.20.1)</h2>
 
-      <div>
-        <label for="username-input">Player Username: </label>
-        <input type="text" id="username-input" value="Player" style="padding: 5px; margin-left: 5px;">
+      <div style="margin-bottom: 15px;">
+        <label for="username-input" style="font-size: 14px;">Username: </label>
+        <input type="text" id="username-input" class="input-field" value="WebPlayer" style="margin-left: 5px;">
       </div>
-      <br>
 
       <div>
-        <label><strong>Launch Target:</strong></label>
-        <select id="target-mode" style="padding: 5px;">
-          <option value="forge">Forge 1.20.1 (ForgeBootstrap)</option>
+        <label style="font-size: 14px;"><strong>Execution Target:</strong></label>
+        <select id="target-mode" class="input-field" style="margin-left: 5px;">
+          <option value="forge">Forge 1.20.1 Bootstrap (Heavy)</option>
           <option value="vanilla">Vanilla 1.20.1 Client (Direct LWJGL Probe)</option>
         </select>
       </div>
 
-      <button id="start-btn" disabled>Launch 1.20.1 & Capture Errors</button>
-      <div id="status">Booting CheerpJ 4.2 (Java 17)...</div>
+      <button id="start-btn" class="btn" disabled>Initialize 1.20.1 Execution</button>
+      <div id="status">Awaiting CheerpJ 4.2 JRE 17 load...</div>
     </div>
 
-    <!-- On-screen terminal box capturing JVM stack traces -->
-    <div id="console-container">Initializing environment...</div>
+    <!-- Live execution trace -->
+    <div id="console-container"></div>
 
     <div id="game-container">
       <minecraft-client style="width: 100%; height: 100%;"></minecraft-client>
@@ -93,49 +75,53 @@
       const consoleBox = document.getElementById("console-container");
       const statusText = document.getElementById("status");
       const startBtn = document.getElementById("start-btn");
-      const menu = document.getElementById("launcher-menu");
       const targetMode = document.getElementById("target-mode");
       const usernameInput = document.getElementById("username-input");
 
+      // High-performance logger to prevent DOM stalling
       function log(msg, type = "info") {
         const div = document.createElement("div");
-        if (type === "err") div.className = "log-err";
-        if (type === "warn") div.className = "log-warn";
-        div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        div.className = `log-${type}`;
+        div.textContent = `[${new Date().toISOString().split('T')[1].slice(0,-1)}] ${msg}`;
         consoleBox.appendChild(div);
-        consoleBox.scrollTop = consoleBox.scrollHeight;
+        // Only auto-scroll if near the bottom to save CPU cycles
+        if (consoleBox.scrollHeight - consoleBox.scrollTop < 600) {
+          consoleBox.scrollTop = consoleBox.scrollHeight;
+        }
       }
 
-      // Mirror all browser console messages into the on-screen box
-      const origLog = console.log;
-      const origWarn = console.warn;
-      const origErr = console.error;
-      console.log = (...args) => { log(args.join(" ")); origLog(...args); };
+      // Intercept browser console
+      const origLog = console.log; const origWarn = console.warn; const origErr = console.error;
+      console.log = (...args) => { log(args.join(" "), "info"); origLog(...args); };
       console.warn = (...args) => { log(args.join(" "), "warn"); origWarn(...args); };
       console.error = (...args) => { log(args.join(" "), "err"); origErr(...args); };
 
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
+      // Initialize JVM with aggressive optimizations
       try {
-        log("Loading CheerpJ runtime with OpenJDK 17 and module boundaries opened...");
+        log("Booting OpenJDK 17 with maximum browser optimizations...");
         await cheerpjInit({
           version: 17,
+          status: "none", // Disable default UI to save DOM renders
+          disableMetrics: true,
           javaProperties: [
             `java.library.path=${nativesPath}`,
             "org.lwjgl.util.NoChecks=true",
             "fml.ignoreInvalidMinecraftCertificates=true",
-            "--add-opens=java.base/java.lang=ALL-UNNAMED",
-            "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
-            "--add-opens=java.base/java.util=ALL-UNNAMED"
+            "sun.java2d.opengl=true", // Hint Java to use GL pipeline if possible
+            "cheerpj.disableMetrics=true"
           ]
         });
 
-        statusText.innerText = "CheerpJ 17 initialized. Ready to probe.";
-        log("CheerpJ JRE 17 ready.");
+        statusText.innerText = "JVM 17 Ready. Awaiting launch command.";
+        statusText.style.color = "#00e676";
+        log("CheerpJ initialization complete.");
         startBtn.disabled = false;
       } catch (e) {
-        log(`Failed to initialize CheerpJ: ${e.message || e}`, "err");
+        log(`CRITICAL INIT FAILURE: ${e.message || e}`, "err");
         statusText.innerText = "Initialization failed. Check logs.";
+        statusText.style.color = "#ff1744";
       }
 
       startBtn.addEventListener("click", async () => {
@@ -143,12 +129,11 @@
         const mode = targetMode.value;
         const username = usernameInput.value || "Player";
 
-        log(`Starting launch probe (Mode: ${mode})...`);
+        log(`--> Triggering execution sequence for: ${mode.toUpperCase()}`);
 
         try {
           if (mode === "vanilla") {
-            // Probe vanilla 1.20.1 against the existing LWJGL 2 shim
-            log("Executing net.minecraft.client.main.Main from /app/minecraft-1.20.1-client.jar...");
+            log("Mounting /app/minecraft-1.20.1-client.jar...");
             await cheerpjRunMain(
               "net.minecraft.client.main.Main",
               "/app/minecraft-1.20.1-client.jar",
@@ -158,8 +143,7 @@
               "--assetsDir", "/files/assets"
             );
           } else {
-            // Probe Forge 1.20.1 ModLauncher bootstrap
-            log("Executing net.minecraftforge.bootstrap.ForgeBootstrap...");
+            log("Mounting ForgeBootstrap and resolving module pathways...");
             const classpath = "/app/forge-1.20.1-47.4.28-universal.jar:/app/minecraft-1.20.1-client.jar";
             await cheerpjRunMain(
               "net.minecraftforge.bootstrap.ForgeBootstrap",
@@ -171,10 +155,11 @@
             );
           }
         } catch (err) {
-          log(`CRASH TRACE DETECTED: ${err.message || err}`, "err");
-          if (err.stack) {
-            log(err.stack, "err");
-          }
+          log(`FATAL EXCEPTION: ${err.message || err}`, "err");
+          if (err.stack) log(err.stack, "err");
+          statusText.innerText = "Execution halted. See console trace.";
+          statusText.style.color = "#ff1744";
+          startBtn.disabled = false; // Allow re-attempt
         }
       });
     </script>
