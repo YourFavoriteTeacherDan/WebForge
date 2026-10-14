@@ -1,132 +1,281 @@
 <!DOCTYPE html>
-<html lang="en" style="width:100%; height:100%; overflow:hidden; background-color:#050505; color:#e0e0e0; font-family:sans-serif;">
+<html lang="en" style="width:100%; height:100%; overflow:hidden; background-color:#070709; color:#e4e4e7; font-family:system-ui,-apple-system,sans-serif;">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebForge 1.20.1 - LWJGL 3 Bridge Test</title>
+    <title>WebForge 1.20.1 — LWJGL 3 & OpenJDK 17 Engine</title>
+    <link rel="icon" href="data:,">
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
-      body { margin: 0; display: flex; flex-direction: column; }
-      #launcher-menu { padding: 15px; background: #111; border-bottom: 2px solid #2a2a2a; }
-      .btn { padding: 10px 18px; background: #00e676; color: #000; font-weight: bold; border: none; cursor: pointer; }
-      .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
-      #console-container { flex: 1; background: #000; color: #00ff66; font-family: monospace; font-size: 12px; padding: 15px; overflow-y: auto; white-space: pre-wrap; }
-      .log-info { color: #00e676; }
-      .log-err { color: #ff1744; font-weight: bold; }
-      .log-glfw { color: #00b0ff; font-weight: bold; background: rgba(0, 176, 255, 0.1); }
-      canvas { display: none; margin: 0 auto; border: 2px solid #333; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        background: #070709;
+      }
+      #top-bar {
+        padding: 12px 18px;
+        background: #121216;
+        border-bottom: 1px solid #27272a;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        z-index: 20;
+      }
+      .brand {
+        font-weight: 800;
+        font-size: 16px;
+        color: #00e676;
+        letter-spacing: 0.4px;
+        margin-right: 8px;
+      }
+      .control-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        background: #18181c;
+        padding: 5px 10px;
+        border-radius: 6px;
+        border: 1px solid #27272a;
+      }
+      input[type="text"], select {
+        background: #09090b;
+        border: 1px solid #3f3f46;
+        color: #f4f4f5;
+        padding: 5px 8px;
+        border-radius: 4px;
+        font-size: 13px;
+      }
+      .btn {
+        padding: 8px 14px;
+        background: #00e676;
+        color: #050505;
+        font-weight: 700;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 13px;
+        transition: all 0.15s ease;
+      }
+      .btn:hover:not(:disabled) { background: #00c853; transform: translateY(-1px); }
+      .btn:disabled { background: #27272a; color: #71717a; cursor: not-allowed; }
+      .btn-secondary {
+        background: #27272a;
+        color: #e4e4e7;
+        border: 1px solid #3f3f46;
+      }
+      .btn-secondary:hover:not(:disabled) { background: #3f3f46; }
+      #status-banner {
+        font-family: monospace;
+        font-size: 12px;
+        color: #a1a1aa;
+        margin-left: auto;
+      }
+      #progress-strip {
+        height: 4px;
+        width: 100%;
+        background: #18181b;
+        position: relative;
+        overflow: hidden;
+      }
+      #progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #00e676, #00b0ff);
+        transition: width 0.15s ease;
+      }
+      #main-split {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+      }
+      #console-pane {
+        flex: 1;
+        background: #050507;
+        color: #d4d4d8;
+        font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+        font-size: 12px;
+        padding: 14px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border-right: 1px solid #1f1f23;
+      }
+      #viewport-pane {
+        flex: 1.4;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        position: relative;
+      }
+      .log-info { color: #86efac; }
+      .log-warn { color: #fde047; }
+      .log-err { color: #f87171; font-weight: bold; background: rgba(248, 113, 113, 0.08); padding: 2px 4px; }
+      .log-glfw { color: #38bdf8; font-weight: bold; }
+      .log-gl { color: #c084fc; }
+      .log-net { color: #fb923c; }
     </style>
   </head>
   <body>
 
-    <div id="launcher-menu">
-      <h2 style="margin: 0 0 10px 0; color: #fff;">LWJGL 3 JavaScript Bridge (Vanilla 1.20.1)</h2>
-      <button id="start-btn" class="btn" disabled>Boot Engine & Test GLFW Bridge</button>
-      <span id="status" style="margin-left: 10px; color: #b9f6ca; font-family: monospace;">Awaiting CheerpJ...</span>
+    <div id="top-bar">
+      <div class="brand">WEBFORGE 1.20.1 [LWJGL 3]</div>
+
+      <div class="control-group">
+        <label for="username-input">User:</label>
+        <input type="text" id="username-input" value="Player" style="width:95px;">
+      </div>
+
+      <div class="control-group">
+        <label for="launch-mode">Profile:</label>
+        <select id="launch-mode">
+          <option value="forge-flat">Forge 1.20.1 (Unified Classpath + ModLoader)</option>
+          <option value="forge-bootstrap">Forge 1.20.1 (BootstrapLauncher)</option>
+          <option value="vanilla">Vanilla 1.20.1 (Direct Main)</option>
+        </select>
+      </div>
+
+      <div class="control-group">
+        <label title="Optional: Pick your local Prism Launcher libraries/ folder to skip cloud downloading">
+          Prism Libs Folder:
+        </label>
+        <input type="file" id="prism-libs-input" webkitdirectory directory multiple style="width:170px; font-size:11px;">
+      </div>
+
+      <div class="control-group">
+        <label>Mods (.jar):</label>
+        <input type="file" id="mod-upload" multiple accept=".jar" style="width:140px; font-size:11px;">
+      </div>
+
+      <button id="clear-cache-btn" class="btn btn-secondary" title="Clear IndexedDB cached libraries">Clear Lib Cache</button>
+      <button id="start-btn" class="btn" disabled>Boot 1.20.1 Engine</button>
+
+      <div id="status-banner">Initializing CheerpJ 4.2...</div>
     </div>
 
-    <!-- The WebGL Canvas Minecraft will eventually draw to -->
-    <canvas id="minecraft-canvas" width="854" height="480"></canvas>
-    <div id="console-container"></div>
+    <div id="progress-strip"><div id="progress-fill"></div></div>
+
+    <div id="main-split">
+      <div id="console-pane"></div>
+      <div id="viewport-pane">
+        <minecraft-client id="mc-element" style="width:100%; height:100%;"></minecraft-client>
+      </div>
+    </div>
 
     <script type="module">
-      const consoleBox = document.getElementById("console-container");
-      const statusText = document.getElementById("status");
-      const startBtn = document.getElementById("start-btn");
+      import MinecraftClient from "./minecraft-web.js";
+      import lwjglNatives from "./natives/lwjgl";
+      import netlibNatives from "./natives/netlib.js";
 
-      function log(msg, type = "info") {
-        const div = document.createElement("div");
-        div.className = `log-${type}`;
-        div.textContent = `[${new Date().toISOString().split('T')[1].slice(0,-1)}] ${msg}`;
-        consoleBox.appendChild(div);
-        consoleBox.scrollTop = consoleBox.scrollHeight;
+      MinecraftClient.register();
+
+      const consolePane = document.getElementById("console-pane");
+      const statusBanner = document.getElementById("status-banner");
+      const progressFill = document.getElementById("progress-fill");
+      const startBtn = document.getElementById("start-btn");
+      const clearCacheBtn = document.getElementById("clear-cache-btn");
+      const launchModeSelect = document.getElementById("launch-mode");
+      const usernameInput = document.getElementById("username-input");
+      const prismLibsInput = document.getElementById("prism-libs-input");
+      const modUploadInput = document.getElementById("mod-upload");
+      const mcElement = document.getElementById("mc-element");
+
+      function log(msg, cls = "info") {
+        const line = document.createElement("div");
+        line.className = `log-${cls}`;
+        const ts = new Date().toISOString().split("T")[1].slice(0, -1);
+        line.textContent = `[${ts}] ${msg}`;
+        consolePane.appendChild(line);
+        if (consolePane.scrollHeight - consolePane.scrollTop < 800) {
+          consolePane.scrollTop = consolePane.scrollHeight;
+        }
       }
 
-      // Intercept standard logs
-      const origLog = console.log; const origErr = console.error;
-      console.log = (...args) => { log(args.join(" "), "info"); origLog(...args); };
-      console.error = (...args) => { log(args.join(" "), "err"); origErr(...args); };
+      window.webforgeLog = log;
 
-      // ==========================================
-      // PHASE 1: THE LWJGL 3 / GLFW JS BRIDGE
-      // ==========================================
-      const glfwBridge = {
-        // Intercept: org.lwjgl.glfw.GLFW.nglfwInit()
-        async Java_org_lwjgl_glfw_GLFW_nglfwInit(lib) {
-          log(">> SUCCESS: Intercepted nglfwInit()!", "glfw");
-          return 1; // 1 = GLFW_TRUE (Success)
-        },
-        
-        // Intercept: org.lwjgl.glfw.GLFW.nglfwSetErrorCallback()
-        async Java_org_lwjgl_glfw_GLFW_nglfwSetErrorCallback(lib, callbackPtr) {
-          log(`>> SUCCESS: Intercepted nglfwSetErrorCallback (Pointer: ${callbackPtr})`, "glfw");
-          return 0; // Return dummy previous callback pointer
-        },
-        
-        // Intercept: org.lwjgl.glfw.GLFW.nglfwCreateWindow()
-        async Java_org_lwjgl_glfw_GLFW_nglfwCreateWindow(lib, width, height, titlePtr, monitorPtr, sharePtr) {
-          log(`>> SUCCESS: Intercepted nglfwCreateWindow (${width}x${height})`, "glfw");
-          document.getElementById("minecraft-canvas").style.display = "block";
-          return 123456789; // Return dummy window pointer address
-        },
+      const origLog = console.log;
+      const origWarn = console.warn;
+      const origErr = console.error;
+      console.log = (...a) => { log(a.join(" "), "info"); origLog(...a); };
+      console.warn = (...a) => { log(a.join(" "), "warn"); origWarn(...a); };
+      console.error = (...a) => { log(a.join(" "), "err"); origErr(...a); };
 
-        // Intercept: org.lwjgl.glfw.GLFW.nglfwMakeContextCurrent()
-        async Java_org_lwjgl_glfw_GLFW_nglfwMakeContextCurrent(lib, windowPtr) {
-          log(`>> SUCCESS: Intercepted nglfwMakeContextCurrent for window ${windowPtr}`, "glfw");
-        },
+      // Combine LWJGL 3 + LWJGL 2 + Netlib natives into a single Proxy-backed JNI table
+      const combinedNativesTarget = Object.assign({}, lwjglNatives, netlibNatives);
+      const nativeProxy = lwjglNatives.__createDynamicJNIProxy
+        ? lwjglNatives.__createDynamicJNIProxy(combinedNativesTarget, log)
+        : combinedNativesTarget;
 
-        // Intercept: MemoryUtil / Unsafe allocators (often hit early)
-        async Java_org_lwjgl_system_MemoryUtil_nmemAlloc(lib, size) {
-          log(`>> Intercepted MemoryUtil.nmemAlloc (${size} bytes)`, "glfw");
-          return 999999; // Dummy pointer
-        }
-      };
+      const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
       try {
-        log("Booting OpenJDK 17 with injected GLFW Native Bridge...");
+        log("Booting CheerpJ 4.2 (OpenJDK 17) with LWJGL 3 + GLFW + STB + WebGL 2 Native Bridge...", "glfw");
         await cheerpjInit({
           version: 17,
           status: "none",
-          natives: glfwBridge, // Inject our custom JavaScript C++ wrapper
+          disableMetrics: true,
+          natives: nativeProxy,
           javaProperties: [
+            `java.library.path=${nativesPath}`,
             "org.lwjgl.util.NoChecks=true",
-            "java.awt.headless=false"
+            "org.lwjgl.util.Debug=true",
+            "org.lwjgl.util.DebugLoader=true",
+            "org.lwjgl.system.allocator=system",
+            "org.lwjgl.glfw.checkThread0=false",
+            "java.awt.headless=false",
+            "fml.ignoreInvalidMinecraftCertificates=true",
+            "fml.ignorePatchDiscrepancies=true",
+            "minecraft.launcher.brand=WebForge",
+            "minecraft.launcher.version=1.20.1"
           ]
         });
 
-        statusText.innerText = "Bridge Ready.";
+        window.cjLib = await cheerpjRunLibrary("");
+        statusBanner.textContent = "JVM 17 Ready.";
+        statusBanner.style.color = "#00e676";
+        log("CheerpJ 17 & LWJGL 3 Native Bridge Ready.", "glfw");
         startBtn.disabled = false;
-      } catch (e) {
-        log(`INIT FAILURE: ${e.message}`, "err");
+      } catch (err) {
+        log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
+        statusBanner.textContent = "Init Failed";
       }
 
-      async function downloadAndMount(filename) {
-        log(`Fetching ${filename}...`);
-        const response = await fetch(`./${filename}`);
-        if (!response.ok) throw new Error(`Missing ${filename}`);
-        const view = new Uint8Array(await response.arrayBuffer());
-        cheerpOSAddStringFile(`/str/${filename}`, view);
-        return `/str/${filename}`;
-      }
+      clearCacheBtn.addEventListener("click", async () => {
+        await mcElement.clearLibraryCache();
+        log("Cleared IndexedDB library cache.", "warn");
+      });
 
       startBtn.addEventListener("click", async () => {
         startBtn.disabled = true;
+        const mode = launchModeSelect.value;
+        const username = usernameInput.value || "Player";
+        const localLibFiles = Array.from(prismLibsInput.files || []);
+        const modFiles = Array.from(modUploadInput.files || []);
+
         try {
-          // Mount the Vanilla client ONLY to bypass Forge Classpath Hell
-          const clientPath = await downloadAndMount("minecraft-1.20.1-client.jar");
-          
-          log(`Executing net.minecraft.client.main.Main...`);
-          await cheerpjRunMain(
-            "net.minecraft.client.main.Main",
-            clientPath,
-            "--version", "1.20.1",
-            "--username", "Player",
-            "--gameDir", "/files/game",
-            "--assetsDir", "/files/assets"
-          );
+          await mcElement.run1201({
+            mode,
+            username,
+            localLibFiles,
+            modFiles,
+            onProgress(pct, statusMsg) {
+              progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+              if (statusMsg) statusBanner.textContent = statusMsg;
+            },
+            log
+          });
         } catch (err) {
-          log(`HALT: ${err.message || err}`, "err");
+          log(`EXECUTION HALTED: ${err.message || err}`, "err");
           if (err.stack) log(err.stack, "err");
+          statusBanner.textContent = "Execution Halted";
+          statusBanner.style.color = "#f87171";
           startBtn.disabled = false;
         }
       });
