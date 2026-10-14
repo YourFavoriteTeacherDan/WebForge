@@ -1,11 +1,49 @@
 // ============================================================================
 // WebForge Unified LWJGL 3.3.1 (GLFW, OpenGL 3.2+ Core, STBImage, OpenAL,
-// DynamicLinkLoader dlsym, MemoryUtil / LibC / JEmalloc) & LWJGL 2 Bridge
+// DynamicLinkLoader dlsym, ThreadLocalUtil, MemoryUtil / LibC / JEmalloc)
+// With Lazy WebGL 2 Context Binding
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
 
-function getActiveCanvas() {
+let glCanvas = null;
+let glCtx = null;
+let debugRendererExt = null;
+let canvasListenersAttached = false;
+
+const GL_CONST = (typeof WebGL2RenderingContext !== "undefined")
+  ? WebGL2RenderingContext
+  : {
+      FRAGMENT_SHADER: 0x8B30,
+      VERTEX_SHADER: 0x8B31,
+      COMPILE_STATUS: 0x8B81,
+      LINK_STATUS: 0x8B82,
+      VALIDATE_STATUS: 0x8B83,
+      MAX_TEXTURE_SIZE: 0x0D33,
+      MAX_RENDERBUFFER_SIZE: 0x84E8,
+      BLEND: 0x0BE2,
+      DEPTH_TEST: 0x0B71,
+      CULL_FACE: 0x0B44,
+      SCISSOR_TEST: 0x0C11,
+      STENCIL_TEST: 0x0B90,
+      POLYGON_OFFSET_FILL: 0x8037,
+      PACK_ALIGNMENT: 0x0D05,
+      UNPACK_ALIGNMENT: 0x0CF5,
+      UNPACK_ROW_LENGTH: 0x0CF2,
+      UNPACK_SKIP_PIXELS: 0x0CF4,
+      UNPACK_SKIP_ROWS: 0x0CF3,
+      ARRAY_BUFFER: 0x8892,
+      ELEMENT_ARRAY_BUFFER: 0x8893,
+      DYNAMIC_DRAW: 0x88E8,
+      TEXTURE_WRAP_S: 0x2802,
+      TEXTURE_WRAP_T: 0x2803,
+      CLAMP_TO_EDGE: 0x812F,
+      RGBA: 0x1908,
+      RGBA8: 0x8058,
+      UNSIGNED_BYTE: 0x1401
+    };
+
+function resolveActiveCanvas() {
   if (window.lwjglCanvasElement instanceof HTMLCanvasElement) {
     return window.lwjglCanvasElement;
   }
@@ -17,37 +55,112 @@ function getActiveCanvas() {
       return c;
     }
   }
-  const fallback = document.querySelector("canvas") || document.createElement("canvas");
-  window.lwjglCanvasElement = fallback;
-  return fallback;
+  const existing = document.querySelector("canvas");
+  if (existing) {
+    window.lwjglCanvasElement = existing;
+    return existing;
+  }
+  const created = document.createElement("canvas");
+  created.width = 854;
+  created.height = 480;
+  created.style.width = "100%";
+  created.style.height = "100%";
+  const viewportPane = document.getElementById("viewport-pane") || document.body;
+  viewportPane.appendChild(created);
+  window.lwjglCanvasElement = created;
+  return created;
 }
 
-const glCanvas = getActiveCanvas();
-const glCtx = glCanvas.getContext("webgl2", {
-  antialias: false,
-  alpha: false,
-  depth: true,
-  stencil: true,
-  powerPreference: "high-performance",
-  desynchronized: true,
-  preserveDrawingBuffer: false
-});
+function attachInputListeners(canvas) {
+  if (canvasListenersAttached || !canvas) return;
+  canvasListenersAttached = true;
 
-if (!glCtx) {
-  throw new Error("WebGL 2 is required for WebForge LWJGL 3.");
+  const onKeyDown = e => {
+    const k = browserCodeToGLFWKey(e.code);
+    if (k > 0 && k < 512) glfwState.keys[k] = 1;
+  };
+  const onKeyUp = e => {
+    const k = browserCodeToGLFWKey(e.code);
+    if (k > 0 && k < 512) glfwState.keys[k] = 0;
+  };
+
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+
+  canvas.addEventListener("mousedown", e => {
+    canvas.focus?.();
+    glfwState.mouseButtons[e.button] = 1;
+    if (glfwState.cursorMode === GLFW_CURSOR_DISABLED && document.pointerLockElement !== canvas) {
+      try { canvas.requestPointerLock(); } catch (_) {}
+    }
+  });
+
+  window.addEventListener("mouseup", e => {
+    glfwState.mouseButtons[e.button] = 0;
+  });
+
+  window.addEventListener("mousemove", e => {
+    if (document.pointerLockElement === canvas) {
+      glfwState.mouseX += e.movementX;
+      glfwState.mouseY += e.movementY;
+    } else {
+      const r = canvas.getBoundingClientRect();
+      glfwState.mouseX = e.clientX - r.left;
+      glfwState.mouseY = e.clientY - r.top;
+    }
+  });
+
+  canvas.addEventListener("contextmenu", e => e.preventDefault());
 }
 
-const debugRendererExt = glCtx.getExtension("WEBGL_debug_renderer_info");
-glCtx.getExtension("EXT_color_buffer_float");
-glCtx.getExtension("OES_texture_float_linear");
+function ensureGLContext() {
+  if (glCtx) return glCtx;
+
+  glCanvas = resolveActiveCanvas();
+  attachInputListeners(glCanvas);
+
+  // Try progressively more permissive context attribute sets
+  const optionProfiles = [
+    { alpha: false, depth: true, stencil: true, antialias: false, powerPreference: "high-performance", preserveDrawingBuffer: false },
+    { alpha: false, depth: true, stencil: true, antialias: false },
+    { depth: true, stencil: true },
+    {}
+  ];
+
+  for (const opts of optionProfiles) {
+    try {
+      glCtx = glCanvas.getContext("webgl2", opts);
+      if (glCtx) break;
+    } catch (_) {}
+  }
+
+  // Fallback to WebGL 1 if WebGL 2 is restricted on the current canvas
+  if (!glCtx) {
+    try {
+      glCtx = glCanvas.getContext("webgl") || glCanvas.getContext("experimental-webgl");
+    } catch (_) {}
+  }
+
+  if (glCtx) {
+    try {
+      debugRendererExt = glCtx.getExtension("WEBGL_debug_renderer_info");
+      glCtx.getExtension("EXT_color_buffer_float");
+      glCtx.getExtension("OES_texture_float_linear");
+    } catch (_) {}
+  } else {
+    window.webforgeLog?.("[LWJGL3] Warning: Browser did not return a WebGL context yet.", "warn");
+  }
+
+  return glCtx;
+}
 
 // ============================================================================
 // 1. Wasm Linear Memory & Off-Heap Pointer Subsystem
 // ============================================================================
 class WasmHeapMemoryManager {
   constructor() {
-    this.allocations = new Map(); // ptr -> { size, byteBufferRef }
-    this.jsFallbackBlocks = new Map(); // ptr -> Uint8Array
+    this.allocations = new Map();
+    this.jsFallbackBlocks = new Map();
     this.nextFallbackPtr = 0x50000000;
     this.heapView = null;
     this.rawBuffer = null;
@@ -56,12 +169,14 @@ class WasmHeapMemoryManager {
 
   getDataView(lib) {
     if (lib && typeof lib.getJNIDataView === "function") {
-      const v = lib.getJNIDataView();
-      if (v && v.buffer !== this.rawBuffer) {
-        this.rawBuffer = v.buffer;
-        this.heapView = new Uint8Array(v.buffer);
-      }
-      return v;
+      try {
+        const v = lib.getJNIDataView();
+        if (v && v.buffer !== this.rawBuffer) {
+          this.rawBuffer = v.buffer;
+          this.heapView = new Uint8Array(v.buffer);
+        }
+        return v;
+      } catch (_) {}
     }
     return null;
   }
@@ -71,7 +186,6 @@ class WasmHeapMemoryManager {
     return this.heapView;
   }
 
-  // Synchronous off-heap allocation aligned to 16 bytes
   malloc(lib, size) {
     const byteSize = Math.max(16, Number(size) || 16);
     const alignedSize = (byteSize + 15) & ~15;
@@ -88,7 +202,7 @@ class WasmHeapMemoryManager {
   }
 
   calloc(lib, num, size) {
-    const total = Math.max(16, Number(num) * Number(size));
+    const total = Math.max(16, (Number(num) || 1) * (Number(size) || 1));
     const ptr = this.malloc(lib, total);
     this.memset(lib, ptr, 0, total);
     return ptr;
@@ -125,7 +239,7 @@ class WasmHeapMemoryManager {
     const len = Number(size);
     const s = this.getSubarray(lib, src, len);
     const d = this.getSubarray(lib, dst, len);
-    if (s && d) d.set(s);
+    if (s && d) d.set(s.subarray(0, d.length));
     return Number(dst);
   }
 
@@ -136,7 +250,7 @@ class WasmHeapMemoryManager {
 
     if (this.jsFallbackBlocks.has(p)) {
       const blk = this.jsFallbackBlocks.get(p);
-      return len > 0 ? blk.subarray(0, len) : blk;
+      return len > 0 ? blk.subarray(0, Math.min(len, blk.length)) : blk;
     }
 
     const heap = this.getHeapUint8(lib);
@@ -145,16 +259,17 @@ class WasmHeapMemoryManager {
       return heap.subarray(p, safeEnd);
     }
 
-    // Create fallback on demand if Java passed an out-of-range virtual address
-    const fallback = new Uint8Array(Math.max(len, 64));
+    const fallback = new Uint8Array(Math.max(len, 256));
     this.jsFallbackBlocks.set(p, fallback);
+    this.allocations.set(p, fallback.length);
     return len > 0 ? fallback.subarray(0, len) : fallback;
   }
 
   readCString(lib, ptr) {
+    if (!ptr) return "";
+    if (typeof ptr === "string") return ptr;
     const p = Number(ptr);
     if (!p) return "";
-    if (typeof ptr === "string") return ptr;
 
     const slice = this.getSubarray(lib, p, 4096);
     if (!slice) return "";
@@ -180,7 +295,7 @@ class WasmHeapMemoryManager {
     const p = Number(ptr);
     if (!p) return 0;
     const v = this.getDataView(lib);
-    if (v && p + 4 <= v.byteLength) return v.getInt32(p, true);
+    if (v && p > 0 && p + 4 <= v.byteLength) return v.getInt32(p, true);
     const sub = this.getSubarray(lib, p, 4);
     return sub ? new DataView(sub.buffer, sub.byteOffset, 4).getInt32(0, true) : 0;
   }
@@ -189,7 +304,7 @@ class WasmHeapMemoryManager {
     const p = Number(ptr);
     if (!p) return;
     const v = this.getDataView(lib);
-    if (v && p + 4 <= v.byteLength) {
+    if (v && p > 0 && p + 4 <= v.byteLength) {
       v.setInt32(p, Number(val), true);
       return;
     }
@@ -201,7 +316,7 @@ class WasmHeapMemoryManager {
     const p = Number(ptr);
     if (!p) return;
     const v = this.getDataView(lib);
-    if (v && p + 4 <= v.byteLength) {
+    if (v && p > 0 && p + 4 <= v.byteLength) {
       v.setFloat32(p, Number(val), true);
       return;
     }
@@ -213,7 +328,7 @@ class WasmHeapMemoryManager {
     const p = Number(ptr);
     if (!p) return;
     const v = this.getDataView(lib);
-    if (v && p + 8 <= v.byteLength) {
+    if (v && p > 0 && p + 8 <= v.byteLength) {
       v.setFloat64(p, Number(val), true);
       return;
     }
@@ -225,7 +340,7 @@ class WasmHeapMemoryManager {
 const mem = new WasmHeapMemoryManager();
 
 // ============================================================================
-// 2. Dynamic C Symbol Registry (Tracks dlsym & glfwGetProcAddress Pointers)
+// 2. Dynamic C Symbol Registry (dlsym & glfwGetProcAddress)
 // ============================================================================
 class NativeSymbolRegistry {
   constructor() {
@@ -253,12 +368,14 @@ class NativeSymbolRegistry {
     if (this.nameToId.has(name)) {
       return this.nameToId.get(name);
     }
-    // Auto-bind to glDispatch or glfwDispatch if matching
     if (glDispatch[name]) {
       return this.register(name, glDispatch[name]);
     }
     if (glfwDispatch[name]) {
       return this.register(name, glfwDispatch[name]);
+    }
+    if (alDispatch[name]) {
+      return this.register(name, alDispatch[name]);
     }
     return this.register(name, null);
   }
@@ -317,6 +434,7 @@ const glfwState = {
 };
 
 function browserCodeToGLFWKey(code) {
+  if (!code) return 0;
   if (code.startsWith("Key")) return code.charCodeAt(3);
   if (code.startsWith("Digit")) return code.charCodeAt(5);
   const map = {
@@ -334,38 +452,11 @@ function browserCodeToGLFWKey(code) {
   return map[code] || 0;
 }
 
-glCanvas.addEventListener("keydown", e => {
-  const k = browserCodeToGLFWKey(e.code);
-  if (k > 0 && k < 512) glfwState.keys[k] = 1;
-});
-glCanvas.addEventListener("keyup", e => {
-  const k = browserCodeToGLFWKey(e.code);
-  if (k > 0 && k < 512) glfwState.keys[k] = 0;
-});
-glCanvas.addEventListener("mousedown", e => {
-  glfwState.mouseButtons[e.button] = 1;
-  if (glfwState.cursorMode === GLFW_CURSOR_DISABLED && document.pointerLockElement !== glCanvas) {
-    try { glCanvas.requestPointerLock(); } catch (_) {}
-  }
-});
-glCanvas.addEventListener("mouseup", e => {
-  glfwState.mouseButtons[e.button] = 0;
-});
-glCanvas.addEventListener("mousemove", e => {
-  if (document.pointerLockElement === glCanvas) {
-    glfwState.mouseX += e.movementX;
-    glfwState.mouseY += e.movementY;
-  } else {
-    const r = glCanvas.getBoundingClientRect();
-    glfwState.mouseX = e.clientX - r.left;
-    glfwState.mouseY = e.clientY - r.top;
-  }
-});
-
 const glfwDispatch = {
   glfwInit(lib) {
+    ensureGLContext();
     glfwState.initialized = true;
-    window.webforgeLog?.("[GLFW] glfwInit() -> GLFW_TRUE", "glfw");
+    window.webforgeLog?.("[GLFW] glfwInit() -> Context & Input Initialized", "glfw");
     return GLFW_TRUE;
   },
   glfwTerminate(lib) {
@@ -383,7 +474,7 @@ const glfwDispatch = {
   },
   glfwGetError(lib, descriptionPtr) {
     if (descriptionPtr) mem.writeInt32(lib, descriptionPtr, 0);
-    return 0; // GLFW_NO_ERROR
+    return 0;
   },
   glfwSetErrorCallback(lib, cbfun) {
     const prev = glfwState.callbacks.error || 0;
@@ -394,12 +485,15 @@ const glfwDispatch = {
   glfwWindowHint(lib, hint, value) {},
   glfwWindowHintString(lib, hint, valuePtr) {},
   glfwCreateWindow(lib, width, height, titlePtr, monitor, share) {
+    ensureGLContext();
     glfwState.width = Number(width) || 854;
     glfwState.height = Number(height) || 480;
     glfwState.title = mem.readCString(lib, titlePtr) || "Minecraft 1.20.1";
-    glCanvas.width = glfwState.width;
-    glCanvas.height = glfwState.height;
-    glCanvas.style.display = "block";
+    if (glCanvas) {
+      glCanvas.width = glfwState.width;
+      glCanvas.height = glfwState.height;
+      glCanvas.style.display = "block";
+    }
     window.webforgeLog?.(`[GLFW] glfwCreateWindow(${glfwState.width}x${glfwState.height}, "${glfwState.title}")`, "glfw");
     return glfwState.windowHandle;
   },
@@ -421,20 +515,22 @@ const glfwDispatch = {
   },
   glfwSetWindowPos(lib, window, xpos, ypos) {},
   glfwGetWindowSize(lib, window, widthPtr, heightPtr) {
-    if (widthPtr) mem.writeInt32(lib, widthPtr, glCanvas.width || glfwState.width);
-    if (heightPtr) mem.writeInt32(lib, heightPtr, glCanvas.height || glfwState.height);
+    if (widthPtr) mem.writeInt32(lib, widthPtr, (glCanvas && glCanvas.width) || glfwState.width);
+    if (heightPtr) mem.writeInt32(lib, heightPtr, (glCanvas && glCanvas.height) || glfwState.height);
   },
   glfwSetWindowSize(lib, window, width, height) {
-    glfwState.width = Number(width);
-    glfwState.height = Number(height);
-    glCanvas.width = glfwState.width;
-    glCanvas.height = glfwState.height;
+    glfwState.width = Number(width) || 854;
+    glfwState.height = Number(height) || 480;
+    if (glCanvas) {
+      glCanvas.width = glfwState.width;
+      glCanvas.height = glfwState.height;
+    }
   },
   glfwSetWindowSizeLimits(lib, window, minwidth, minheight, maxwidth, maxheight) {},
   glfwSetWindowAspectRatio(lib, window, numer, denom) {},
   glfwGetFramebufferSize(lib, window, widthPtr, heightPtr) {
-    if (widthPtr) mem.writeInt32(lib, widthPtr, glCanvas.width || glfwState.width);
-    if (heightPtr) mem.writeInt32(lib, heightPtr, glCanvas.height || glfwState.height);
+    if (widthPtr) mem.writeInt32(lib, widthPtr, (glCanvas && glCanvas.width) || glfwState.width);
+    if (heightPtr) mem.writeInt32(lib, heightPtr, (glCanvas && glCanvas.height) || glfwState.height);
   },
   glfwGetWindowFrameSize(lib, window, lPtr, tPtr, rPtr, bPtr) {
     if (lPtr) mem.writeInt32(lib, lPtr, 0);
@@ -450,21 +546,23 @@ const glfwDispatch = {
   glfwRestoreWindow(lib, window) {},
   glfwMaximizeWindow(lib, window) {},
   glfwShowWindow(lib, window) {
-    glCanvas.style.display = "block";
+    if (glCanvas) glCanvas.style.display = "block";
   },
   glfwHideWindow(lib, window) {},
   glfwFocusWindow(lib, window) {
-    glCanvas.focus();
+    glCanvas?.focus?.();
   },
   glfwRequestWindowAttention(lib, window) {},
   glfwGetWindowMonitor(lib, window) {
-    return 0; // Windowed mode
+    return 0;
   },
   glfwSetWindowMonitor(lib, window, monitor, xpos, ypos, width, height, refreshRate) {
-    glfwState.width = Number(width);
-    glfwState.height = Number(height);
-    glCanvas.width = glfwState.width;
-    glCanvas.height = glfwState.height;
+    glfwState.width = Number(width) || 854;
+    glfwState.height = Number(height) || 480;
+    if (glCanvas) {
+      glCanvas.width = glfwState.width;
+      glCanvas.height = glfwState.height;
+    }
   },
   glfwGetWindowAttrib(lib, window, attrib) {
     return glfwState.windowAttribs.get(Number(attrib)) ?? 1;
@@ -525,7 +623,9 @@ const glfwDispatch = {
     mem.writeInt32(lib, p + 20, 60);
     return p;
   },
-  glfwMakeContextCurrent(lib, window) {},
+  glfwMakeContextCurrent(lib, window) {
+    ensureGLContext();
+  },
   glfwGetCurrentContext(lib) {
     return glfwState.windowHandle;
   },
@@ -534,8 +634,10 @@ const glfwDispatch = {
   },
   glfwSwapInterval(lib, interval) {},
   glfwExtensionSupported(lib, extPtr) {
+    ensureGLContext();
     const ext = mem.readCString(lib, extPtr);
-    const supported = glCtx.getSupportedExtensions() || [];
+    if (SUPPORTED_GL_EXTENSIONS.includes(ext)) return GLFW_TRUE;
+    const supported = (glCtx && glCtx.getSupportedExtensions()) || [];
     return supported.includes(ext) ? GLFW_TRUE : GLFW_FALSE;
   },
   glfwGetProcAddress(lib, procnamePtr) {
@@ -563,7 +665,7 @@ const glfwDispatch = {
   glfwSetInputMode(lib, window, mode, value) {
     if (Number(mode) === GLFW_CURSOR) {
       glfwState.cursorMode = Number(value);
-      if (glfwState.cursorMode === GLFW_CURSOR_DISABLED) {
+      if (glfwState.cursorMode === GLFW_CURSOR_DISABLED && glCanvas) {
         try { glCanvas.requestPointerLock(); } catch (_) {}
       } else if (document.pointerLockElement === glCanvas) {
         try { document.exitPointerLock(); } catch (_) {}
@@ -612,7 +714,6 @@ const glfwDispatch = {
   }
 };
 
-// Register all GLFW callback setters automatically
 [
   "glfwSetWindowPosCallback", "glfwSetWindowSizeCallback", "glfwSetWindowCloseCallback",
   "glfwSetWindowRefreshCallback", "glfwSetWindowFocusCallback", "glfwSetWindowIconifyCallback",
@@ -645,7 +746,7 @@ const glObjects = {
   samplers: [null],
   queries: [null],
   syncs: [null],
-  mappedBuffers: new Map() // target -> { bufferId, ptr, length }
+  mappedBuffers: new Map()
 };
 
 let boundArrayBufferId = 0;
@@ -677,12 +778,10 @@ const SUPPORTED_GL_EXTENSIONS = [
   "GL_KHR_debug"
 ];
 
-// Translates Minecraft 1.20.1 Blaze3D GLSL (#version 150) to WebGL 2 (#version 300 es)
 function transpileGLSL150ToWebGL2(source, shaderType) {
   let src = String(source || "").trim();
-  const isFrag = (shaderType === glCtx.FRAGMENT_SHADER);
+  const isFrag = (shaderType === GL_CONST.FRAGMENT_SHADER);
 
-  // Strip #version 110/120/130/140/150/330/400+
   src = src.replace(/#version\s+\d+\s*(core|compatibility)?[^\n]*/g, "");
 
   let header = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
@@ -702,15 +801,16 @@ function transpileGLSL150ToWebGL2(source, shaderType) {
 
 const glDispatch = {
   glGetError() {
-    return 0; // Prevent spurious GL errors from halting Blaze3D initialization
+    return 0;
   },
   glGetString(lib, name) {
+    ensureGLContext();
     const n = Number(name);
     let str = "";
     if (n === 0x1F00 /* GL_VENDOR */) {
-      str = (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
+      str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
     } else if (n === 0x1F01 /* GL_RENDERER */) {
-      str = (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
+      str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
     } else if (n === 0x1F02 /* GL_VERSION */) {
       str = "3.2.0 WebForge WebGL 2.0";
     } else if (n === 0x8B8C /* GL_SHADING_LANGUAGE_VERSION */) {
@@ -726,26 +826,27 @@ const glDispatch = {
     return mem.allocCString(lib, ext);
   },
   glGetIntegerv(lib, pname, paramsPtr) {
+    ensureGLContext();
     const p = Number(pname);
     let val = 0;
     if (p === 0x821B /* GL_MAJOR_VERSION */) val = 3;
     else if (p === 0x821C /* GL_MINOR_VERSION */) val = 2;
     else if (p === 0x821D /* GL_NUM_EXTENSIONS */) val = SUPPORTED_GL_EXTENSIONS.length;
-    else if (p === 0x9126 /* GL_CONTEXT_PROFILE_MASK */) val = 1; // GL_CONTEXT_CORE_PROFILE_BIT
-    else if (p === 0x0D33 /* GL_MAX_TEXTURE_SIZE */) val = glCtx.getParameter(glCtx.MAX_TEXTURE_SIZE) || 8192;
-    else if (p === 0x84E8 /* GL_MAX_RENDERBUFFER_SIZE */) val = glCtx.getParameter(glCtx.MAX_RENDERBUFFER_SIZE) || 8192;
+    else if (p === 0x9126 /* GL_CONTEXT_PROFILE_MASK */) val = 1;
+    else if (p === 0x0D33 /* GL_MAX_TEXTURE_SIZE */) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_TEXTURE_SIZE)) || 8192;
+    else if (p === 0x84E8 /* GL_MAX_RENDERBUFFER_SIZE */) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_RENDERBUFFER_SIZE)) || 8192;
     else if (p === 0x8872 /* GL_MAX_TEXTURE_IMAGE_UNITS */) val = 16;
     else if (p === 0x8B4D /* GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS */) val = 32;
     else if (p === 0x8869 /* GL_MAX_VERTEX_ATTRIBS */) val = 16;
     else if (p === 0x0BA2 /* GL_VIEWPORT */) {
       mem.writeInt32(lib, Number(paramsPtr) + 0, 0);
       mem.writeInt32(lib, Number(paramsPtr) + 4, 0);
-      mem.writeInt32(lib, Number(paramsPtr) + 8, glCanvas.width);
-      mem.writeInt32(lib, Number(paramsPtr) + 12, glCanvas.height);
+      mem.writeInt32(lib, Number(paramsPtr) + 8, (glCanvas && glCanvas.width) || 854);
+      mem.writeInt32(lib, Number(paramsPtr) + 12, (glCanvas && glCanvas.height) || 480);
       return;
     } else {
       try {
-        const res = glCtx.getParameter(p);
+        const res = glCtx ? glCtx.getParameter(p) : 16;
         val = typeof res === "number" ? res : 16;
       } catch (_) {
         val = 16;
@@ -761,85 +862,92 @@ const glDispatch = {
     if (sub) sub[0] = 1;
   },
   glClearColor(lib, r, g, b, a) {
-    glCtx.clearColor(Number(r), Number(g), Number(b), Number(a));
+    ensureGLContext()?.clearColor(Number(r), Number(g), Number(b), Number(a));
   },
   glClearDepth(lib, d) {
-    glCtx.clearDepth(Number(d));
+    ensureGLContext()?.clearDepth(Number(d));
   },
   glClearStencil(lib, s) {
-    glCtx.clearStencil(Number(s));
+    ensureGLContext()?.clearStencil(Number(s));
   },
   glClear(lib, mask) {
-    glCtx.clear(Number(mask));
+    ensureGLContext()?.clear(Number(mask));
   },
   glViewport(lib, x, y, w, h) {
-    glCtx.viewport(Number(x), Number(y), Number(w), Number(h));
+    ensureGLContext()?.viewport(Number(x), Number(y), Number(w), Number(h));
   },
   glScissor(lib, x, y, w, h) {
-    glCtx.scissor(Number(x), Number(y), Number(w), Number(h));
+    ensureGLContext()?.scissor(Number(x), Number(y), Number(w), Number(h));
   },
   glEnable(lib, cap) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const c = Number(cap);
-    if (c === glCtx.BLEND || c === glCtx.DEPTH_TEST || c === glCtx.CULL_FACE || c === glCtx.SCISSOR_TEST || c === glCtx.STENCIL_TEST || c === glCtx.POLYGON_OFFSET_FILL) {
-      glCtx.enable(c);
+    if (c === GL_CONST.BLEND || c === GL_CONST.DEPTH_TEST || c === GL_CONST.CULL_FACE || c === GL_CONST.SCISSOR_TEST || c === GL_CONST.STENCIL_TEST || c === GL_CONST.POLYGON_OFFSET_FILL) {
+      ctx.enable(c);
     }
   },
   glDisable(lib, cap) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const c = Number(cap);
-    if (c === glCtx.BLEND || c === glCtx.DEPTH_TEST || c === glCtx.CULL_FACE || c === glCtx.SCISSOR_TEST || c === glCtx.STENCIL_TEST || c === glCtx.POLYGON_OFFSET_FILL) {
-      glCtx.disable(c);
+    if (c === GL_CONST.BLEND || c === GL_CONST.DEPTH_TEST || c === GL_CONST.CULL_FACE || c === GL_CONST.SCISSOR_TEST || c === GL_CONST.STENCIL_TEST || c === GL_CONST.POLYGON_OFFSET_FILL) {
+      ctx.disable(c);
     }
   },
   glDepthFunc(lib, func) {
-    glCtx.depthFunc(Number(func));
+    ensureGLContext()?.depthFunc(Number(func));
   },
   glDepthMask(lib, flag) {
-    glCtx.depthMask(Boolean(flag));
+    ensureGLContext()?.depthMask(Boolean(flag));
   },
   glBlendFunc(lib, sfactor, dfactor) {
-    glCtx.blendFunc(Number(sfactor), Number(dfactor));
+    ensureGLContext()?.blendFunc(Number(sfactor), Number(dfactor));
   },
   glBlendFuncSeparate(lib, srcRGB, dstRGB, srcA, dstA) {
-    glCtx.blendFuncSeparate(Number(srcRGB), Number(dstRGB), Number(srcA), Number(dstA));
+    ensureGLContext()?.blendFuncSeparate(Number(srcRGB), Number(dstRGB), Number(srcA), Number(dstA));
   },
   glBlendEquation(lib, mode) {
-    glCtx.blendEquation(Number(mode));
+    ensureGLContext()?.blendEquation(Number(mode));
   },
   glBlendEquationSeparate(lib, modeRGB, modeAlpha) {
-    glCtx.blendEquationSeparate(Number(modeRGB), Number(modeAlpha));
+    ensureGLContext()?.blendEquationSeparate(Number(modeRGB), Number(modeAlpha));
   },
   glBlendColor(lib, r, g, b, a) {
-    glCtx.blendColor(Number(r), Number(g), Number(b), Number(a));
+    ensureGLContext()?.blendColor(Number(r), Number(g), Number(b), Number(a));
   },
   glColorMask(lib, r, g, b, a) {
-    glCtx.colorMask(Boolean(r), Boolean(g), Boolean(b), Boolean(a));
+    ensureGLContext()?.colorMask(Boolean(r), Boolean(g), Boolean(b), Boolean(a));
   },
   glCullFace(lib, mode) {
-    glCtx.cullFace(Number(mode));
+    ensureGLContext()?.cullFace(Number(mode));
   },
   glFrontFace(lib, mode) {
-    glCtx.frontFace(Number(mode));
+    ensureGLContext()?.frontFace(Number(mode));
   },
   glPolygonOffset(lib, factor, units) {
-    glCtx.polygonOffset(Number(factor), Number(units));
+    ensureGLContext()?.polygonOffset(Number(factor), Number(units));
   },
   glPolygonMode(lib, face, mode) {},
   glLineWidth(lib, width) {
-    glCtx.lineWidth(Number(width));
+    ensureGLContext()?.lineWidth(Number(width));
   },
   glPixelStorei(lib, pname, param) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const p = Number(pname);
-    if (p === glCtx.PACK_ALIGNMENT || p === glCtx.UNPACK_ALIGNMENT || p === glCtx.UNPACK_ROW_LENGTH || p === glCtx.UNPACK_SKIP_PIXELS || p === glCtx.UNPACK_SKIP_ROWS) {
-      glCtx.pixelStorei(p, Number(param));
+    if (p === GL_CONST.PACK_ALIGNMENT || p === GL_CONST.UNPACK_ALIGNMENT || p === GL_CONST.UNPACK_ROW_LENGTH || p === GL_CONST.UNPACK_SKIP_PIXELS || p === GL_CONST.UNPACK_SKIP_ROWS) {
+      ctx.pixelStorei(p, Number(param));
     }
   },
 
   // Buffers (VBO, EBO, UBO)
   glGenBuffers(lib, n, buffersPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(buffersPtr);
     for (let i = 0; i < count; i++) {
-      const id = registerGLObj(glObjects.buffers, glCtx.createBuffer());
+      const id = registerGLObj(glObjects.buffers, ctx ? ctx.createBuffer() : {});
       mem.writeInt32(lib, base + i * 4, id);
     }
   },
@@ -847,35 +955,38 @@ const glDispatch = {
     glDispatch.glGenBuffers(lib, n, buffersPtr);
   },
   glBindBuffer(lib, target, buffer) {
+    const ctx = ensureGLContext();
     const t = Number(target);
     const id = Number(buffer);
-    if (t === glCtx.ARRAY_BUFFER) boundArrayBufferId = id;
-    if (t === glCtx.ELEMENT_ARRAY_BUFFER) boundElementBufferId = id;
-    glCtx.bindBuffer(t, glObjects.buffers[id] || null);
+    if (t === GL_CONST.ARRAY_BUFFER) boundArrayBufferId = id;
+    if (t === GL_CONST.ELEMENT_ARRAY_BUFFER) boundElementBufferId = id;
+    ctx?.bindBuffer(t, glObjects.buffers[id] || null);
   },
   glBindBufferBase(lib, target, index, buffer) {
-    glCtx.bindBufferBase(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null);
+    ensureGLContext()?.bindBufferBase?.(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null);
   },
   glBindBufferRange(lib, target, index, buffer, offset, size) {
-    glCtx.bindBufferRange(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null, Number(offset), Number(size));
+    ensureGLContext()?.bindBufferRange?.(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null, Number(offset), Number(size));
   },
-  glBufferData(lib, target, sizeOrData, dataPtrOrUsage, usageMaybe) {
+  glBufferData(lib, target, size, dataPtr, usage) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const t = Number(target);
-    if (usageMaybe !== undefined) {
-      const size = Number(sizeOrData);
-      const dataPtr = Number(dataPtrOrUsage);
-      const usage = Number(usageMaybe);
-      if (dataPtr === 0) {
-        glCtx.bufferData(t, size, usage);
-      } else {
-        const sub = mem.getSubarray(lib, dataPtr, size);
-        glCtx.bufferData(t, sub, usage);
-      }
+    const byteSize = Number(size);
+    const ptr = Number(dataPtr);
+    const u = Number(usage) || GL_CONST.DYNAMIC_DRAW;
+    if (ptr === 0) {
+      ctx.bufferData(t, byteSize, u);
+    } else {
+      const sub = mem.getSubarray(lib, ptr, byteSize);
+      ctx.bufferData(t, sub, u);
     }
   },
   glBufferSubData(lib, target, offset, size, dataPtr) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const sub = mem.getSubarray(lib, dataPtr, Number(size));
-    if (sub) glCtx.bufferSubData(Number(target), Number(offset), sub);
+    if (sub) ctx.bufferSubData(Number(target), Number(offset), sub);
   },
   glMapBuffer(lib, target, access) {
     const t = Number(target);
@@ -892,15 +1003,16 @@ const glDispatch = {
     return ptr;
   },
   glUnmapBuffer(lib, target) {
+    const ctx = ensureGLContext();
     const t = Number(target);
     const mapped = glObjects.mappedBuffers.get(t);
-    if (mapped) {
+    if (mapped && ctx) {
       const sub = mem.getSubarray(lib, mapped.ptr, mapped.length);
       if (sub) {
         try {
-          glCtx.bufferSubData(t, mapped.offset || 0, sub);
+          ctx.bufferSubData(t, mapped.offset || 0, sub);
         } catch (_) {
-          glCtx.bufferData(t, sub, glCtx.DYNAMIC_DRAW);
+          ctx.bufferData(t, sub, GL_CONST.DYNAMIC_DRAW);
         }
       }
       mem.free(lib, mapped.ptr);
@@ -909,12 +1021,13 @@ const glDispatch = {
     return 1;
   },
   glDeleteBuffers(lib, n, buffersPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(buffersPtr);
     for (let i = 0; i < count; i++) {
       const id = mem.readInt32(lib, base + i * 4);
       if (glObjects.buffers[id]) {
-        glCtx.deleteBuffer(glObjects.buffers[id]);
+        ctx?.deleteBuffer(glObjects.buffers[id]);
         glObjects.buffers[id] = null;
       }
     }
@@ -922,10 +1035,11 @@ const glDispatch = {
 
   // VAOs & Attributes
   glGenVertexArrays(lib, n, arraysPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(arraysPtr);
     for (let i = 0; i < count; i++) {
-      const id = registerGLObj(glObjects.vaos, glCtx.createVertexArray());
+      const id = registerGLObj(glObjects.vaos, ctx?.createVertexArray ? ctx.createVertexArray() : {});
       mem.writeInt32(lib, base + i * 4, id);
     }
   },
@@ -933,47 +1047,55 @@ const glDispatch = {
     glDispatch.glGenVertexArrays(lib, n, arraysPtr);
   },
   glBindVertexArray(lib, array) {
-    glCtx.bindVertexArray(glObjects.vaos[Number(array)] || null);
+    ensureGLContext()?.bindVertexArray?.(glObjects.vaos[Number(array)] || null);
   },
   glDeleteVertexArrays(lib, n, arraysPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(arraysPtr);
     for (let i = 0; i < count; i++) {
       const id = mem.readInt32(lib, base + i * 4);
       if (glObjects.vaos[id]) {
-        glCtx.deleteVertexArray(glObjects.vaos[id]);
+        ctx?.deleteVertexArray?.(glObjects.vaos[id]);
         glObjects.vaos[id] = null;
       }
     }
   },
   glEnableVertexAttribArray(lib, index) {
-    glCtx.enableVertexAttribArray(Number(index));
+    ensureGLContext()?.enableVertexAttribArray(Number(index));
   },
   glDisableVertexAttribArray(lib, index) {
-    glCtx.disableVertexAttribArray(Number(index));
+    ensureGLContext()?.disableVertexAttribArray(Number(index));
   },
   glVertexAttribPointer(lib, index, size, type, normalized, stride, pointer) {
-    glCtx.vertexAttribPointer(Number(index), Number(size), Number(type), Boolean(normalized), Number(stride), Number(pointer));
+    ensureGLContext()?.vertexAttribPointer(Number(index), Number(size), Number(type), Boolean(normalized), Number(stride), Number(pointer));
   },
   glVertexAttribIPointer(lib, index, size, type, stride, pointer) {
-    glCtx.vertexAttribIPointer(Number(index), Number(size), Number(type), Number(stride), Number(pointer));
+    const ctx = ensureGLContext();
+    if (ctx?.vertexAttribIPointer) {
+      ctx.vertexAttribIPointer(Number(index), Number(size), Number(type), Number(stride), Number(pointer));
+    } else {
+      ctx?.vertexAttribPointer(Number(index), Number(size), Number(type), false, Number(stride), Number(pointer));
+    }
   },
   glVertexAttribDivisor(lib, index, divisor) {
-    glCtx.vertexAttribDivisor(Number(index), Number(divisor));
+    ensureGLContext()?.vertexAttribDivisor?.(Number(index), Number(divisor));
   },
 
   // Shaders & Programs
   glCreateShader(lib, type) {
+    const ctx = ensureGLContext();
     const t = Number(type);
-    const s = glCtx.createShader(t);
+    const s = ctx ? ctx.createShader(t) : {};
     const id = registerGLObj(glObjects.shaders, s);
     glObjects.shaderTypes[id] = t;
     return id;
   },
   glShaderSource(lib, shader, count, stringsPtr, lengthPtr) {
+    const ctx = ensureGLContext();
     const id = Number(shader);
     const s = glObjects.shaders[id];
-    if (!s) return;
+    if (!s || !ctx) return;
     const c = Number(count) || 1;
     let combined = "";
     for (let i = 0; i < c; i++) {
@@ -987,29 +1109,32 @@ const glDispatch = {
       }
     }
     const transpiled = transpileGLSL150ToWebGL2(combined, glObjects.shaderTypes[id]);
-    glCtx.shaderSource(s, transpiled);
+    ctx.shaderSource(s, transpiled);
   },
   glCompileShader(lib, shader) {
+    const ctx = ensureGLContext();
     const s = glObjects.shaders[Number(shader)];
-    if (!s) return;
-    glCtx.compileShader(s);
-    if (!glCtx.getShaderParameter(s, glCtx.COMPILE_STATUS)) {
-      window.webforgeLog?.(`[GLSL Compile Warning] ${glCtx.getShaderInfoLog(s)}`, "warn");
+    if (!s || !ctx) return;
+    ctx.compileShader(s);
+    if (!ctx.getShaderParameter(s, GL_CONST.COMPILE_STATUS)) {
+      window.webforgeLog?.(`[GLSL Compile Warning] ${ctx.getShaderInfoLog(s)}`, "warn");
     }
   },
   glGetShaderiv(lib, shader, pname, paramsPtr) {
+    const ctx = ensureGLContext();
     const s = glObjects.shaders[Number(shader)];
     const p = Number(pname);
-    if (p === glCtx.COMPILE_STATUS) {
-      mem.writeInt32(lib, paramsPtr, 1); // Keep Blaze3D running even if a fallback shader warns
+    if (p === GL_CONST.COMPILE_STATUS) {
+      mem.writeInt32(lib, paramsPtr, 1);
       return;
     }
-    const val = s ? glCtx.getShaderParameter(s, p) : 0;
+    const val = (s && ctx) ? ctx.getShaderParameter(s, p) : 0;
     mem.writeInt32(lib, paramsPtr, typeof val === "boolean" ? (val ? 1 : 0) : (val || 0));
   },
   glGetShaderInfoLog(lib, shader, maxLength, lengthPtr, infoLogPtr) {
+    const ctx = ensureGLContext();
     const s = glObjects.shaders[Number(shader)];
-    const info = (s && glCtx.getShaderInfoLog(s)) || "";
+    const info = (s && ctx && ctx.getShaderInfoLog(s)) || "";
     const bytes = new TextEncoder().encode(info);
     const len = Math.min(Number(maxLength) - 1, bytes.length);
     if (lengthPtr) mem.writeInt32(lib, lengthPtr, len);
@@ -1020,156 +1145,169 @@ const glDispatch = {
     }
   },
   glDeleteShader(lib, shader) {
+    const ctx = ensureGLContext();
     const id = Number(shader);
     if (glObjects.shaders[id]) {
-      glCtx.deleteShader(glObjects.shaders[id]);
+      ctx?.deleteShader(glObjects.shaders[id]);
       glObjects.shaders[id] = null;
     }
   },
   glCreateProgram(lib) {
-    return registerGLObj(glObjects.programs, glCtx.createProgram());
+    const ctx = ensureGLContext();
+    return registerGLObj(glObjects.programs, ctx ? ctx.createProgram() : {});
   },
   glAttachShader(lib, program, shader) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
     const s = glObjects.shaders[Number(shader)];
-    if (p && s) glCtx.attachShader(p, s);
+    if (p && s && ctx) ctx.attachShader(p, s);
   },
   glDetachShader(lib, program, shader) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
     const s = glObjects.shaders[Number(shader)];
-    if (p && s) glCtx.detachShader(p, s);
+    if (p && s && ctx) ctx.detachShader(p, s);
   },
   glBindAttribLocation(lib, program, index, namePtr) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
-    if (p) glCtx.bindAttribLocation(p, Number(index), mem.readCString(lib, namePtr));
+    if (p && ctx) ctx.bindAttribLocation(p, Number(index), mem.readCString(lib, namePtr));
   },
   glBindFragDataLocation(lib, program, colorNumber, namePtr) {},
   glLinkProgram(lib, program) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
-    if (p) glCtx.linkProgram(p);
+    if (p && ctx) ctx.linkProgram(p);
   },
   glUseProgram(lib, program) {
-    glCtx.useProgram(glObjects.programs[Number(program)] || null);
+    ensureGLContext()?.useProgram(glObjects.programs[Number(program)] || null);
   },
   glGetProgramiv(lib, program, pname, paramsPtr) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
     const n = Number(pname);
-    if (n === glCtx.LINK_STATUS || n === glCtx.VALIDATE_STATUS) {
+    if (n === GL_CONST.LINK_STATUS || n === GL_CONST.VALIDATE_STATUS) {
       mem.writeInt32(lib, paramsPtr, 1);
       return;
     }
-    const val = p ? glCtx.getProgramParameter(p, n) : 0;
+    const val = (p && ctx) ? ctx.getProgramParameter(p, n) : 0;
     mem.writeInt32(lib, paramsPtr, typeof val === "boolean" ? (val ? 1 : 0) : (val || 0));
   },
   glGetProgramInfoLog(lib, program, maxLength, lengthPtr, infoLogPtr) {
     if (lengthPtr) mem.writeInt32(lib, lengthPtr, 0);
   },
   glDeleteProgram(lib, program) {
+    const ctx = ensureGLContext();
     const id = Number(program);
     if (glObjects.programs[id]) {
-      glCtx.deleteProgram(glObjects.programs[id]);
+      ctx?.deleteProgram(glObjects.programs[id]);
       glObjects.programs[id] = null;
     }
   },
   glGetAttribLocation(lib, program, namePtr) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
-    return p ? glCtx.getAttribLocation(p, mem.readCString(lib, namePtr)) : 0;
+    return (p && ctx) ? ctx.getAttribLocation(p, mem.readCString(lib, namePtr)) : 0;
   },
   glGetUniformLocation(lib, program, namePtr) {
+    const ctx = ensureGLContext();
     const p = glObjects.programs[Number(program)];
-    if (!p) return -1;
-    const loc = glCtx.getUniformLocation(p, mem.readCString(lib, namePtr));
+    if (!p || !ctx) return -1;
+    const loc = ctx.getUniformLocation(p, mem.readCString(lib, namePtr));
     if (!loc) return -1;
     return registerGLObj(glObjects.uniforms, loc);
   },
   glUniform1i(lib, location, v0) {
     const u = glObjects.uniforms[Number(location)];
-    if (u) glCtx.uniform1i(u, Number(v0));
+    if (u) ensureGLContext()?.uniform1i(u, Number(v0));
   },
   glUniform1f(lib, location, v0) {
     const u = glObjects.uniforms[Number(location)];
-    if (u) glCtx.uniform1f(u, Number(v0));
+    if (u) ensureGLContext()?.uniform1f(u, Number(v0));
   },
   glUniform2f(lib, location, v0, v1) {
     const u = glObjects.uniforms[Number(location)];
-    if (u) glCtx.uniform2f(u, Number(v0), Number(v1));
+    if (u) ensureGLContext()?.uniform2f(u, Number(v0), Number(v1));
   },
   glUniform3f(lib, location, v0, v1, v2) {
     const u = glObjects.uniforms[Number(location)];
-    if (u) glCtx.uniform3f(u, Number(v0), Number(v1), Number(v2));
+    if (u) ensureGLContext()?.uniform3f(u, Number(v0), Number(v1), Number(v2));
   },
   glUniform4f(lib, location, v0, v1, v2, v3) {
     const u = glObjects.uniforms[Number(location)];
-    if (u) glCtx.uniform4f(u, Number(v0), Number(v1), Number(v2), Number(v3));
+    if (u) ensureGLContext()?.uniform4f(u, Number(v0), Number(v1), Number(v2), Number(v3));
   },
   glUniform1fv(lib, location, count, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 4);
-    if (sub) glCtx.uniform1fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count)));
+    if (sub) ensureGLContext()?.uniform1fv(u, new Float32Array(sub.slice().buffer));
   },
   glUniform2fv(lib, location, count, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 8);
-    if (sub) glCtx.uniform2fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 2));
+    if (sub) ensureGLContext()?.uniform2fv(u, new Float32Array(sub.slice().buffer));
   },
   glUniform3fv(lib, location, count, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 12);
-    if (sub) glCtx.uniform3fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 3));
+    if (sub) ensureGLContext()?.uniform3fv(u, new Float32Array(sub.slice().buffer));
   },
   glUniform4fv(lib, location, count, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 16);
-    if (sub) glCtx.uniform4fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 4));
+    if (sub) ensureGLContext()?.uniform4fv(u, new Float32Array(sub.slice().buffer));
   },
   glUniformMatrix3fv(lib, location, count, transpose, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 36);
-    if (sub) glCtx.uniformMatrix3fv(u, Boolean(transpose), new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 9));
+    if (sub) ensureGLContext()?.uniformMatrix3fv(u, Boolean(transpose), new Float32Array(sub.slice().buffer));
   },
   glUniformMatrix4fv(lib, location, count, transpose, valuePtr) {
     const u = glObjects.uniforms[Number(location)];
     if (!u) return;
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 64);
-    if (sub) glCtx.uniformMatrix4fv(u, Boolean(transpose), new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 16));
+    if (sub) ensureGLContext()?.uniformMatrix4fv(u, Boolean(transpose), new Float32Array(sub.slice().buffer));
   },
 
   // Textures & Framebuffers
   glGenTextures(lib, n, texturesPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(texturesPtr);
     for (let i = 0; i < count; i++) {
-      const id = registerGLObj(glObjects.textures, glCtx.createTexture());
-      glObjects.texMeta[id] = { width: 16, height: 16, internalFormat: glCtx.RGBA8 };
+      const id = registerGLObj(glObjects.textures, ctx ? ctx.createTexture() : {});
+      glObjects.texMeta[id] = { width: 16, height: 16, internalFormat: GL_CONST.RGBA8 };
       mem.writeInt32(lib, base + i * 4, id);
     }
   },
   glBindTexture(lib, target, texture) {
     const id = Number(texture);
     boundTexBySlot[activeTexSlot] = id;
-    glCtx.bindTexture(Number(target), glObjects.textures[id] || null);
+    ensureGLContext()?.bindTexture(Number(target), glObjects.textures[id] || null);
   },
   glActiveTexture(lib, texture) {
     const t = Number(texture);
     activeTexSlot = Math.max(0, t - 0x84C0);
-    glCtx.activeTexture(t);
+    ensureGLContext()?.activeTexture(t);
   },
   glTexParameteri(lib, target, pname, param) {
     let p = Number(param);
-    if ((pname === glCtx.TEXTURE_WRAP_S || pname === glCtx.TEXTURE_WRAP_T) && (p === 0x2900 || p === 0x8059)) {
-      p = glCtx.CLAMP_TO_EDGE;
+    if ((pname === GL_CONST.TEXTURE_WRAP_S || pname === GL_CONST.TEXTURE_WRAP_T) && (p === 0x2900 || p === 0x8059)) {
+      p = GL_CONST.CLAMP_TO_EDGE;
     }
-    glCtx.texParameteri(Number(target), Number(pname), p);
+    ensureGLContext()?.texParameteri(Number(target), Number(pname), p);
   },
   glTexParameterf(lib, target, pname, param) {
-    glCtx.texParameterf(Number(target), Number(pname), Number(param));
+    ensureGLContext()?.texParameterf(Number(target), Number(pname), Number(param));
   },
   glTexImage2D(lib, target, level, internalformat, width, height, border, format, type, pixelsPtr) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const w = Number(width);
     const h = Number(height);
     const boundId = boundTexBySlot[activeTexSlot];
@@ -1177,28 +1315,30 @@ const glDispatch = {
       glObjects.texMeta[boundId].width = w;
       glObjects.texMeta[boundId].height = h;
     }
-    const intFmt = (internalformat === glCtx.RGBA || internalformat === 4) ? glCtx.RGBA8 : Number(internalformat);
-    const fmt = (format === 0x80E1 /* BGRA */) ? glCtx.RGBA : Number(format);
-    const typ = (type === 0x8367) ? glCtx.UNSIGNED_BYTE : Number(type);
+    const intFmt = (internalformat === GL_CONST.RGBA || internalformat === 4) ? GL_CONST.RGBA8 : Number(internalformat);
+    const fmt = (format === 0x80E1 /* BGRA */) ? GL_CONST.RGBA : Number(format);
+    const typ = (type === 0x8367) ? GL_CONST.UNSIGNED_BYTE : Number(type);
     const ptr = Number(pixelsPtr);
 
     if (ptr === 0) {
-      glCtx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, null);
+      ctx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, null);
     } else {
       const sub = mem.getSubarray(lib, ptr, w * h * 4);
-      glCtx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, sub);
+      ctx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, sub);
     }
   },
   glTexSubImage2D(lib, target, level, xoffset, yoffset, width, height, format, type, pixelsPtr) {
+    const ctx = ensureGLContext();
+    if (!ctx) return;
     const w = Number(width);
     const h = Number(height);
     const ptr = Number(pixelsPtr);
     if (ptr === 0) return;
-    const fmt = (format === 0x80E1) ? glCtx.RGBA : Number(format);
-    const typ = (type === 0x8367) ? glCtx.UNSIGNED_BYTE : Number(type);
+    const fmt = (format === 0x80E1) ? GL_CONST.RGBA : Number(format);
+    const typ = (type === 0x8367) ? GL_CONST.UNSIGNED_BYTE : Number(type);
     const sub = mem.getSubarray(lib, ptr, w * h * 4);
     if (sub) {
-      glCtx.texSubImage2D(Number(target), Number(level), Number(xoffset), Number(yoffset), w, h, fmt, typ, sub);
+      ctx.texSubImage2D(Number(target), Number(level), Number(xoffset), Number(yoffset), w, h, fmt, typ, sub);
     }
   },
   glGetTexLevelParameteriv(lib, target, level, pname, paramsPtr) {
@@ -1209,74 +1349,78 @@ const glDispatch = {
     else mem.writeInt32(lib, paramsPtr, 0);
   },
   glDeleteTextures(lib, n, texturesPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(texturesPtr);
     for (let i = 0; i < count; i++) {
       const id = mem.readInt32(lib, base + i * 4);
       if (glObjects.textures[id]) {
-        glCtx.deleteTexture(glObjects.textures[id]);
+        ctx?.deleteTexture(glObjects.textures[id]);
         glObjects.textures[id] = null;
       }
     }
   },
   glGenFramebuffers(lib, n, framebuffersPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(framebuffersPtr);
     for (let i = 0; i < count; i++) {
-      const id = registerGLObj(glObjects.framebuffers, glCtx.createFramebuffer());
+      const id = registerGLObj(glObjects.framebuffers, ctx ? ctx.createFramebuffer() : {});
       mem.writeInt32(lib, base + i * 4, id);
     }
   },
   glBindFramebuffer(lib, target, framebuffer) {
-    glCtx.bindFramebuffer(Number(target), glObjects.framebuffers[Number(framebuffer)] || null);
+    ensureGLContext()?.bindFramebuffer(Number(target), glObjects.framebuffers[Number(framebuffer)] || null);
   },
   glFramebufferTexture2D(lib, target, attachment, textarget, texture, level) {
-    glCtx.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
+    ensureGLContext()?.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
   },
   glCheckFramebufferStatus(lib, target) {
     return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
   },
   glBlitFramebuffer(lib, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
-    glCtx.blitFramebuffer(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
+    ensureGLContext()?.blitFramebuffer?.(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
   },
   glDeleteFramebuffers(lib, n, framebuffersPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(framebuffersPtr);
     for (let i = 0; i < count; i++) {
       const id = mem.readInt32(lib, base + i * 4);
       if (glObjects.framebuffers[id]) {
-        glCtx.deleteFramebuffer(glObjects.framebuffers[id]);
+        ctx?.deleteFramebuffer(glObjects.framebuffers[id]);
         glObjects.framebuffers[id] = null;
       }
     }
   },
   glGenRenderbuffers(lib, n, renderbuffersPtr) {
+    const ctx = ensureGLContext();
     const count = Number(n);
     const base = Number(renderbuffersPtr);
     for (let i = 0; i < count; i++) {
-      const id = registerGLObj(glObjects.renderbuffers, glCtx.createRenderbuffer());
+      const id = registerGLObj(glObjects.renderbuffers, ctx ? ctx.createRenderbuffer() : {});
       mem.writeInt32(lib, base + i * 4, id);
     }
   },
   glBindRenderbuffer(lib, target, renderbuffer) {
-    glCtx.bindRenderbuffer(Number(target), glObjects.renderbuffers[Number(renderbuffer)] || null);
+    ensureGLContext()?.bindRenderbuffer(Number(target), glObjects.renderbuffers[Number(renderbuffer)] || null);
   },
   glRenderbufferStorage(lib, target, internalformat, width, height) {
-    glCtx.renderbufferStorage(Number(target), Number(internalformat), Number(width), Number(height));
+    ensureGLContext()?.renderbufferStorage(Number(target), Number(internalformat), Number(width), Number(height));
   },
   glFramebufferRenderbuffer(lib, target, attachment, renderbuffertarget, renderbuffer) {
-    glCtx.framebufferRenderbuffer(Number(target), Number(attachment), Number(renderbuffertarget), glObjects.renderbuffers[Number(renderbuffer)] || null);
+    ensureGLContext()?.framebufferRenderbuffer(Number(target), Number(attachment), Number(renderbuffertarget), glObjects.renderbuffers[Number(renderbuffer)] || null);
   },
   glDrawArrays(lib, mode, first, count) {
-    glCtx.drawArrays(Number(mode), Number(first), Number(count));
+    ensureGLContext()?.drawArrays(Number(mode), Number(first), Number(count));
   },
   glDrawElements(lib, mode, count, type, indices) {
-    glCtx.drawElements(Number(mode), Number(count), Number(type), Number(indices));
+    ensureGLContext()?.drawElements(Number(mode), Number(count), Number(type), Number(indices));
   }
 };
 
 // ============================================================================
-// 5. STBImage PNG/JPEG Hardware Decoder (Used by Minecraft 1.20.1 NativeImage)
+// 5. STBImage PNG/JPEG Hardware Decoder (Minecraft 1.20.1 NativeImage)
 // ============================================================================
 let stbiFlipVertically = false;
 
@@ -1290,7 +1434,6 @@ const stbDispatch = {
   nstbi_info_from_memory(lib, bufferPtr, len, xPtr, yPtr, compPtr) {
     const bytes = mem.getSubarray(lib, bufferPtr, Number(len));
     if (!bytes || bytes.length < 26) return 0;
-    // Parse PNG IHDR directly at offset 16..25
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (dv.getUint32(0) === 0x89504E47) {
       const w = dv.getInt32(16, false);
@@ -1377,6 +1520,11 @@ const alDispatch = {
 // 7. Static + Dynamic Proxy JNI Export Builder
 // ============================================================================
 const baseExports = {
+  // ThreadLocalUtil (Required when LWJGL 3.3.1 initializes Capabilities)
+  Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv: (lib) => mem.calloc(lib, 256, 4),
+  Java_org_lwjgl_system_ThreadLocalUtil_getFunctionMissingAbort: () => symRegistry.register("abort", () => 0),
+  Java_org_lwjgl_system_ThreadLocalUtil_nsetupEnvData: (lib, count) => mem.calloc(lib, Number(count) || 256, 4),
+
   // MemoryAccessJNI & MemoryUtil
   Java_org_lwjgl_system_MemoryAccessJNI_getPointerSize: () => 4,
   Java_org_lwjgl_system_MemoryAccessJNI_malloc: () => symRegistry.register("malloc", (lib, s) => mem.malloc(lib, s)),
@@ -1424,7 +1572,6 @@ const baseExports = {
   Java_org_lwjgl_stb_STBImage_nstbi_1image_1free: stbDispatch.nstbi_image_free
 };
 
-// Populate static GLFW & GL exports onto baseExports
 for (const [fnName, fnImpl] of Object.entries(glfwDispatch)) {
   symRegistry.register(fnName, fnImpl);
   baseExports[`Java_org_lwjgl_glfw_GLFW_${fnName}`] = fnImpl;
@@ -1440,7 +1587,6 @@ for (const [glName, glImpl] of Object.entries(glDispatch)) {
   }
 }
 
-// Dynamic JNI Proxy Generator to intercept all JNI.invoke* / JNI.call* and unenumerated symbols
 function createDynamicJNIProxy(targetObj, logFn) {
   return new Proxy(targetObj, {
     has(target, prop) {
