@@ -1,12 +1,23 @@
 /**
  * WebForge 1.20.1 Client & Dependency Engine
- * Handles Mojang Piston-Meta 1.20.1 libraries, Forge 47.4.28 Maven dependencies,
- * IndexedDB persistent caching, local Prism folder mounting, and JVM bootstrapping.
+ * Explicitly fetches and mounts LWJGL 3.3.1 JARs, Mojang 1.20.1 libraries,
+ * and Forge 47.4.28 Maven dependencies into CheerpJ's /str/ memory filesystem.
  */
 
 const MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
-// Forge 1.20.1 (47.4.28) Required Maven Libraries from maven.minecraftforge.net & Maven Central
+// Guaranteed LWJGL 3.3.1 Core & Module JARs (replaces lwjgl-2.9.0.jar)
+const LWJGL3_CORE_JARS = [
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-glfw/3.3.1/lwjgl-glfw-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-opengl/3.3.1/lwjgl-opengl-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-openal/3.3.1/lwjgl-openal-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-stb/3.3.1/lwjgl-stb-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-jemalloc/3.3.1/lwjgl-jemalloc-3.3.1.jar",
+  "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-tinyfd/3.3.1/lwjgl-tinyfd-3.3.1.jar"
+];
+
+// Forge 1.20.1 (47.4.28) Required Maven Libraries
 const FORGE_1201_MAVEN_LIBS = [
   "https://maven.minecraftforge.net/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar",
   "https://maven.minecraftforge.net/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar",
@@ -38,7 +49,6 @@ const FORGE_1201_MAVEN_LIBS = [
   "https://repo1.maven.org/maven2/org/openjdk/nashorn/nashorn-core/15.4/nashorn-core-15.4.jar"
 ];
 
-// IndexedDB Helper for Persistent Library Caching
 class LibCacheDB {
   #dbPromise = null;
 
@@ -168,7 +178,7 @@ export default class MinecraftClient extends HTMLElement {
     await this.#cacheDB.clear();
   }
 
-  async #fetchWithCache(url, cacheKey, log) {
+  async #fetchWithCache(url, cacheKey) {
     let bytes = await this.#cacheDB.get(cacheKey);
     if (bytes && bytes.byteLength > 0) {
       return bytes;
@@ -197,20 +207,29 @@ export default class MinecraftClient extends HTMLElement {
     }
   }
 
-  /**
-   * Resolves all Minecraft 1.20.1 & Forge 1.20.1 libraries either from the user's
-   * selected local Prism libraries folder or directly from Mojang/Forge CDNs.
-   */
   async #resolveAndMountLibraries({ mode, localLibFiles, onProgress, log }) {
     const mountedPaths = [];
+    const mountedFileNames = new Set();
 
-    // 1. Mount Base Client & Forge Universal JARs from Repo Root
-    onProgress(5, "Mounting base 1.20.1 JARs...");
+    // 1. Explicitly Mount All 7 LWJGL 3.3.1 JARs First (Completely replaces lwjgl-2.9.0.jar)
+    onProgress(3, "Fetching LWJGL 3.3.1 JARs...");
+    log("Fetching & mounting LWJGL 3.3.1 core & GLFW/OpenGL/STB JARs...", "glfw");
+    for (const lwjglUrl of LWJGL3_CORE_JARS) {
+      const fileName = lwjglUrl.split("/").pop();
+      const bytes = await this.#fetchWithCache(lwjglUrl, `lwjgl3:${fileName}`);
+      const vPath = `/str/libs_${fileName}`;
+      cheerpOSAddStringFile(vPath, bytes);
+      mountedPaths.push(vPath);
+      mountedFileNames.add(fileName);
+      log(`Mounted LWJGL 3 JAR: ${vPath} (${(bytes.byteLength / 1024).toFixed(1)} KB)`, "glfw");
+    }
+
+    // 2. Mount Base Client & Forge Universal JARs from Repo Root
+    onProgress(10, "Mounting base 1.20.1 JARs...");
     log("Fetching minecraft-1.20.1-client.jar from repository...", "net");
     const clientBytes = await this.#fetchWithCache(
       new URL("minecraft-1.20.1-client.jar", import.meta.url).href,
-      "repo:minecraft-1.20.1-client.jar",
-      log
+      "repo:minecraft-1.20.1-client.jar"
     );
     cheerpOSAddStringFile("/str/minecraft-1.20.1-client.jar", clientBytes);
     log(`Mounted /str/minecraft-1.20.1-client.jar (${(clientBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
@@ -219,21 +238,22 @@ export default class MinecraftClient extends HTMLElement {
       log("Fetching forge-1.20.1-47.4.28-universal.jar from repository...", "net");
       const forgeBytes = await this.#fetchWithCache(
         new URL("forge-1.20.1-47.4.28-universal.jar", import.meta.url).href,
-        "repo:forge-1.20.1-47.4.28-universal.jar",
-        log
+        "repo:forge-1.20.1-47.4.28-universal.jar"
       );
       cheerpOSAddStringFile("/str/forge-1.20.1-47.4.28-universal.jar", forgeBytes);
       mountedPaths.push("/str/forge-1.20.1-47.4.28-universal.jar");
       log(`Mounted /str/forge-1.20.1-47.4.28-universal.jar (${(forgeBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
     }
 
-    // 2. If user selected their local Prism Launcher libraries/ folder, mount from disk
+    // 3. If user selected their local Prism Launcher libraries/ folder, mount from disk
     if (localLibFiles && localLibFiles.length > 0) {
       const jarFiles = localLibFiles.filter(f =>
         f.name.endsWith(".jar") &&
+        !f.name.includes("2.9.") &&
         !f.name.includes("-natives-") &&
         !f.name.includes("macos") &&
-        !f.name.includes("windows")
+        !f.name.includes("windows") &&
+        !mountedFileNames.has(f.name)
       );
       log(`Mounting ${jarFiles.length} JARs from local Prism libraries folder...`, "glfw");
       let count = 0;
@@ -242,16 +262,17 @@ export default class MinecraftClient extends HTMLElement {
         const vPath = `/str/lib_${count}_${file.name}`;
         cheerpOSAddStringFile(vPath, bytes);
         mountedPaths.push(vPath);
+        mountedFileNames.add(file.name);
         count++;
         if (count % 10 === 0) {
-          onProgress(10 + (count / jarFiles.length) * 80, `Mounted ${count}/${jarFiles.length} local libs...`);
+          onProgress(15 + (count / jarFiles.length) * 75, `Mounted ${count}/${jarFiles.length} local libs...`);
         }
       }
       mountedPaths.push("/str/minecraft-1.20.1-client.jar");
       return mountedPaths;
     }
 
-    // 3. Otherwise, Auto-Fetch Mojang 1.20.1 Official Manifest & Libraries via CDN
+    // 4. Otherwise, Auto-Fetch Mojang 1.20.1 Official Manifest & Libraries via CDN
     log("Querying Mojang Piston-Meta CDN for 1.20.1 dependency manifest...", "net");
     const manifestRes = await fetch(MOJANG_VERSION_MANIFEST_URL);
     const manifestJson = await manifestRes.json();
@@ -261,39 +282,39 @@ export default class MinecraftClient extends HTMLElement {
     const versionRes = await fetch(v1201Entry.url);
     const versionData = await versionRes.json();
 
-    // Filter pure Java libraries (exclude platform-specific C++ native classifiers)
-    const mojangLibs = [];
-    const seenPaths = new Set();
+    const downloadQueue = [];
     for (const libEntry of versionData.libraries) {
       const artifact = libEntry.downloads?.artifact;
       if (!artifact || !artifact.url) continue;
       if (artifact.path.includes("-natives-") || artifact.path.includes("macos") || artifact.path.includes("windows")) {
         continue;
       }
-      if (!seenPaths.has(artifact.path)) {
-        seenPaths.add(artifact.path);
-        mojangLibs.push({
+      const fileName = artifact.path.split("/").pop();
+      if (!mountedFileNames.has(fileName)) {
+        mountedFileNames.add(fileName);
+        downloadQueue.push({
           url: artifact.url,
-          name: artifact.path.split("/").pop(),
+          name: fileName,
           path: artifact.path
         });
       }
     }
 
-    // Add Forge 1.20.1 Maven libraries if running Forge mode
-    const downloadQueue = [...mojangLibs];
     if (mode.startsWith("forge")) {
       for (const forgeUrl of FORGE_1201_MAVEN_LIBS) {
         const fileName = forgeUrl.split("/").pop();
-        downloadQueue.push({
-          url: forgeUrl,
-          name: fileName,
-          path: `forge/${fileName}`
-        });
+        if (!mountedFileNames.has(fileName)) {
+          mountedFileNames.add(fileName);
+          downloadQueue.push({
+            url: forgeUrl,
+            name: fileName,
+            path: `forge/${fileName}`
+          });
+        }
       }
     }
 
-    log(`Resolving ${downloadQueue.length} required 1.20.1 libraries (Cached in IndexedDB)...`, "net");
+    log(`Resolving ${downloadQueue.length} remaining 1.20.1 libraries (Cached in IndexedDB)...`, "net");
 
     let completed = 0;
     const CONCURRENCY = 8;
@@ -304,15 +325,15 @@ export default class MinecraftClient extends HTMLElement {
         const item = queueCopy.shift();
         if (!item) break;
         try {
-          const bytes = await self.#fetchWithCache(item.url, `lib:${item.path}`, log);
+          const bytes = await self.#fetchWithCache(item.url, `lib:${item.path}`);
           const mountName = `/str/libs_${item.name}`;
           cheerpOSAddStringFile(mountName, bytes);
           mountedPaths.push(mountName);
         } catch (err) {
-          log(`Warning: Could not fetch optional library ${item.name}: ${err.message}`, "warn");
+          log(`Warning: Could not fetch library ${item.name}: ${err.message}`, "warn");
         }
         completed++;
-        const pct = 10 + Math.round((completed / downloadQueue.length) * 80);
+        const pct = 15 + Math.round((completed / downloadQueue.length) * 75);
         onProgress(pct, `Libs: ${completed}/${downloadQueue.length} (${item.name})`);
       }
     }
@@ -324,7 +345,7 @@ export default class MinecraftClient extends HTMLElement {
     await Promise.all(workers);
 
     mountedPaths.push("/str/minecraft-1.20.1-client.jar");
-    log(`Successfully mounted ${mountedPaths.length} libraries into CheerpJ /str/ memory filesystem!`, "glfw");
+    log(`Successfully mounted ${mountedPaths.length} total 1.20.1 + LWJGL 3.3.1 libraries into /str/!`, "glfw");
     return mountedPaths;
   }
 
@@ -342,7 +363,6 @@ export default class MinecraftClient extends HTMLElement {
       "/files/assets/objects"
     ]);
 
-    // Mount any uploaded Mod JARs into /files/game/mods and /str/
     const modClasspaths = [];
     if (modFiles && modFiles.length > 0) {
       log(`Injecting ${modFiles.length} user mod(s)...`, "glfw");
@@ -422,7 +442,6 @@ export default class MinecraftClient extends HTMLElement {
         "--height", String(height)
       );
     } else {
-      // forge-flat: Runs ModLauncher / Main directly on the flat classpath without ModuleLayer unionfs failures
       log("Launching Forge 1.20.1 Unified Classpath Mode...", "glfw");
       onProgress(100, "Running Forge 1.20.1 (Unified)");
       return await cheerpjRunMain(
