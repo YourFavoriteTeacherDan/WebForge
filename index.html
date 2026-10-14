@@ -1,216 +1,181 @@
 <!DOCTYPE html>
-<html lang="en" style="width:100%;height:100%;overflow:hidden;background-color:#FFF;color:black;font-family:sans-serif;">
+<html lang="en" style="width:100%;height:100%;overflow:hidden;background-color:#121212;color:#eee;font-family:sans-serif;">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>WebForge</title>
+    <title>WebForge 1.20.1 Probe</title>
     <link rel="icon" type="image/x-icon" href="./favicon.ico">
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
-      #launcher-menu {
-        margin-left: 5px;
-        padding: 5px;
-      }
-      #launcher-menu button {
-        padding: 10px 20px;
-        margin-top: 15px;
-        cursor: pointer;
-        background: #4CAF50;
-        color: black;
-        font-size: 16px;
-      }
-      #launcher-menu button:disabled {
-        background: #666;
-        cursor: not-allowed;
-      }
-      #status {
-        margin-top: 15px;
-        font-size: 14px;
-        color: #000;
-      }
       body {
         margin: 0;
         width: 100%;
         height: 100%;
+        display: flex;
+        flex-direction: column;
       }
+      #launcher-menu {
+        padding: 20px;
+        background: #1e1e1e;
+        border-bottom: 2px solid #333;
+      }
+      #launcher-menu button {
+        padding: 10px 20px;
+        margin-top: 10px;
+        cursor: pointer;
+        background: #4CAF50;
+        color: black;
+        font-weight: bold;
+        border: none;
+        border-radius: 4px;
+        font-size: 15px;
+      }
+      #launcher-menu button:disabled {
+        background: #555;
+        cursor: not-allowed;
+      }
+      #status {
+        margin-top: 10px;
+        font-size: 14px;
+        color: #81c784;
+      }
+      #console-container {
+        flex: 1;
+        background: #000;
+        color: #00ff66;
+        font-family: monospace;
+        font-size: 13px;
+        padding: 15px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        box-sizing: border-box;
+      }
+      .log-err { color: #ff5252; }
+      .log-warn { color: #ffb74d; }
       #game-container {
         display: none;
         width: 100%;
         height: 100%;
-        justify-content: center;
-        align-items: center;
       }
     </style>
   </head>
   <body>
 
     <div id="launcher-menu">
-      <h2>WebForge Launcher v15 - Made by Cucuzacu</h2>
+      <h2>WebForge 1.20.1 Diagnostics (LWJGL 2 / CheerpJ 4.2)</h2>
 
       <div>
-        <label for="username-input">Username: </label>
-        <br>
-        <input type="text" id="username-input" value="Player">
+        <label for="username-input">Player Username: </label>
+        <input type="text" id="username-input" value="Player" style="padding: 5px; margin-left: 5px;">
       </div>
       <br>
 
       <div>
-        <label for="mod-upload">Select Mods (.jar): </label>
-        <br><br>
-        <input type="file" id="mod-upload" multiple accept=".jar,.zip">
+        <label><strong>Launch Target:</strong></label>
+        <select id="target-mode" style="padding: 5px;">
+          <option value="forge">Forge 1.20.1 (ForgeBootstrap)</option>
+          <option value="vanilla">Vanilla 1.20.1 Client (Direct LWJGL Probe)</option>
+        </select>
       </div>
-      <br>
 
-      <div>
-        <label for="resourcepack-upload">Select Resourcepacks (.zip): </label>
-        <br><br>
-        <input type="file" id="resourcepack-upload" multiple accept=".zip">
-      </div>
-      
-      <button id="upload-btn">1. Upload Mods</button>
-      <button id="upload-resourcepack-btn">2. Upload Resourcepacks</button>
-      <br>
-      <button id="start-btn" disabled>3. Start Game</button>
-
-      <div id="status">Initializing Cheerpj...</div>
+      <button id="start-btn" disabled>Launch 1.20.1 & Capture Errors</button>
+      <div id="status">Booting CheerpJ 4.2 (Java 17)...</div>
     </div>
+
+    <!-- On-screen terminal box capturing JVM stack traces -->
+    <div id="console-container">Initializing environment...</div>
 
     <div id="game-container">
       <minecraft-client style="width: 100%; height: 100%;"></minecraft-client>
     </div>
 
     <script type="module">
-      import MinecraftClient from "./minecraft-web.js";
-
+      const consoleBox = document.getElementById("console-container");
       const statusText = document.getElementById("status");
-      const modInput = document.getElementById("mod-upload");
-      const resourcepackInput = document.getElementById("resourcepack-upload");
-      const uploadBtn = document.getElementById("upload-btn");
-      const uploadResourcepackBtn = document.getElementById("upload-resourcepack-btn");
       const startBtn = document.getElementById("start-btn");
       const menu = document.getElementById("launcher-menu");
-      const gameContainer = document.getElementById("game-container");
+      const targetMode = document.getElementById("target-mode");
+      const usernameInput = document.getElementById("username-input");
+
+      function log(msg, type = "info") {
+        const div = document.createElement("div");
+        if (type === "err") div.className = "log-err";
+        if (type === "warn") div.className = "log-warn";
+        div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        consoleBox.appendChild(div);
+        consoleBox.scrollTop = consoleBox.scrollHeight;
+      }
+
+      // Mirror all browser console messages into the on-screen box
+      const origLog = console.log;
+      const origWarn = console.warn;
+      const origErr = console.error;
+      console.log = (...args) => { log(args.join(" ")); origLog(...args); };
+      console.warn = (...args) => { log(args.join(" "), "warn"); origWarn(...args); };
+      console.error = (...args) => { log(args.join(" "), "err"); origErr(...args); };
 
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
-      await cheerpjInit({
-        version: 8,
-        javaProperties: [
-          `java.library.path=${nativesPath}`,
-          "org.lwjgl.util.NoChecks=true", 
-          "fml.ignoreInvalidMinecraftCertificates=true"
-        ],
-      });
-      const lib = await cheerpjRunLibrary("");
+      try {
+        log("Loading CheerpJ runtime with OpenJDK 17 and module boundaries opened...");
+        await cheerpjInit({
+          version: 17,
+          javaProperties: [
+            `java.library.path=${nativesPath}`,
+            "org.lwjgl.util.NoChecks=true",
+            "fml.ignoreInvalidMinecraftCertificates=true",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
+            "--add-opens=java.base/java.util=ALL-UNNAMED"
+          ]
+        });
 
-      statusText.innerText = "Ready. You can upload mods/resourcepacks or start.";
-      startBtn.disabled = false;
+        statusText.innerText = "CheerpJ 17 initialized. Ready to probe.";
+        log("CheerpJ JRE 17 ready.");
+        startBtn.disabled = false;
+      } catch (e) {
+        log(`Failed to initialize CheerpJ: ${e.message || e}`, "err");
+        statusText.innerText = "Initialization failed. Check logs.";
+      }
 
-      uploadBtn.addEventListener("click", async () => {
-        if (modInput.files.length === 0) {
-          alert("Please select at least one mod file!");
-          return;
-        }
-        
-        uploadBtn.disabled = true;
-        uploadResourcepackBtn.disabled = true;
+      startBtn.addEventListener("click", async () => {
         startBtn.disabled = true;
-        statusText.innerText = "Preparing fs...";
-
-        try {
-          const Files = await lib.java.nio.file.Files;
-          const Paths = await lib.java.nio.file.Paths;
-          const StandardCopyOption = await lib.java.nio.file.StandardCopyOption;
-
-          const modsDir = await Paths.get("/files/game/mods");
-          await Files.createDirectories(modsDir);
-
-          for (const file of modInput.files) {
-            statusText.innerText = `Uploading: ${file.name}...`;
-
-            const arrayBuffer = await file.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-
-            const strPath = `/str/${file.name}`;
-            cheerpOSAddStringFile(strPath, uint8Array);
-
-            const source = await Paths.get(strPath);
-            const target = await Paths.get(`/files/game/mods/${file.name}`);
-            
-            await Files.copy(source, target, [StandardCopyOption.REPLACE_EXISTING]);
-            console.log(`Successfully moved ${file.name} to /files/game/mods/`);
-          }
-
-          statusText.innerText = "All mods uploaded! Ready to start.";
-          uploadBtn.innerText = "Uploaded :)";
-        } catch (error) {
-          console.error("Upload failed:", error);
-          statusText.innerText = "Error uploading mods. See console.";
-        } finally {
-          startBtn.disabled = false;
-          uploadBtn.disabled = false;
-          uploadResourcepackBtn.disabled = false;
-        }
-      });
-
-      uploadResourcepackBtn.addEventListener("click", async () => {
-        if (resourcepackInput.files.length === 0) {
-          alert("Please select at least one resourcepack file!");
-          return;
-        }
-        
-        uploadResourcepackBtn.disabled = true;
-        uploadBtn.disabled = true;
-        startBtn.disabled = true;
-        statusText.innerText = "Preparing fs...";
-
-        try {
-          const Files = await lib.java.nio.file.Files;
-          const Paths = await lib.java.nio.file.Paths;
-          const StandardCopyOption = await lib.java.nio.file.StandardCopyOption;
-
-          const resourcepacksDir = await Paths.get("/files/game/resourcepacks");
-          await Files.createDirectories(resourcepacksDir);
-
-          for (const file of resourcepackInput.files) {
-            statusText.innerText = `Uploading: ${file.name}...`;
-
-            const arrayBuffer = await file.arrayBuffer();
-            const uint8Array = new Uint8Array(arrayBuffer);
-
-            const strPath = `/str/${file.name}`;
-            cheerpOSAddStringFile(strPath, uint8Array);
-
-            const source = await Paths.get(strPath);
-            const target = await Paths.get(`/files/game/resourcepacks/${file.name}`);
-            
-            await Files.copy(source, target, [StandardCopyOption.REPLACE_EXISTING]);
-            console.log(`Successfully moved ${file.name} to /files/game/resourcepacks/`);
-          }
-
-          statusText.innerText = "All resourcepacks uploaded! Ready to start.";
-          uploadResourcepackBtn.innerText = "Uploaded :)";
-        } catch (error) {
-          console.error("Upload failed:", error);
-          statusText.innerText = "Error uploading resourcepacks. See console.";
-        } finally {
-          startBtn.disabled = false;
-          uploadResourcepackBtn.disabled = false;
-          uploadBtn.disabled = false;
-        }
-      });
-
-      const usernameInput = document.getElementById("username-input");
-
-      startBtn.addEventListener("click", () => {
-        menu.style.display = "none";
-        gameContainer.style.display = "flex";
-  
-        MinecraftClient.register();
-  
-        const clientElement = document.querySelector("minecraft-client");
+        const mode = targetMode.value;
         const username = usernameInput.value || "Player";
-        clientElement.run(username);
+
+        log(`Starting launch probe (Mode: ${mode})...`);
+
+        try {
+          if (mode === "vanilla") {
+            // Probe vanilla 1.20.1 against the existing LWJGL 2 shim
+            log("Executing net.minecraft.client.main.Main from /app/minecraft-1.20.1-client.jar...");
+            await cheerpjRunMain(
+              "net.minecraft.client.main.Main",
+              "/app/minecraft-1.20.1-client.jar",
+              "--version", "1.20.1",
+              "--username", username,
+              "--gameDir", "/files/game",
+              "--assetsDir", "/files/assets"
+            );
+          } else {
+            // Probe Forge 1.20.1 ModLauncher bootstrap
+            log("Executing net.minecraftforge.bootstrap.ForgeBootstrap...");
+            const classpath = "/app/forge-1.20.1-47.4.28-universal.jar:/app/minecraft-1.20.1-client.jar";
+            await cheerpjRunMain(
+              "net.minecraftforge.bootstrap.ForgeBootstrap",
+              classpath,
+              "--version", "1.20.1",
+              "--username", username,
+              "--gameDir", "/files/game",
+              "--assetsDir", "/files/assets"
+            );
+          }
+        } catch (err) {
+          log(`CRASH TRACE DETECTED: ${err.message || err}`, "err");
+          if (err.stack) {
+            log(err.stack, "err");
+          }
+        }
       });
     </script>
   </body>
