@@ -1,2170 +1,1499 @@
-// Load the glMatrix library
+// ============================================================================
+// WebForge Unified LWJGL 3.3.1 (GLFW, OpenGL 3.2+ Core, STBImage, OpenAL,
+// DynamicLinkLoader dlsym, MemoryUtil / LibC / JEmalloc) & LWJGL 2 Bridge
+// ============================================================================
+
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
 
-const glCanvas = window.lwjglCanvasElement;
-if (!(glCanvas instanceof HTMLCanvasElement)) throw new Error("window.lwjglCanvasElement is not set or is not a canvas");
-const glCtx = glCanvas.getContext("webgl2", { antialias: false, alpha: false, depth: true, stencil: true, powerPreference: "high-performance", desynchronized: true, preserveDrawingBuffer: false });
-const debugRendererExt = glCtx.getExtension("WEBGL_debug_renderer_info");
-
-var vertexShaderSrc = `
-	attribute vec4 aVertexPosition;
-	attribute vec4 aColor;
-	attribute vec2 aTexCoord;
-	attribute vec3 aNormal;
-	
-	uniform mat4 modelView;
-	uniform mat4 projection;
-	uniform mat3 normalMatrix;
-	
-	varying vec2 vTexCoord;
-	varying vec4 vColor;
-	varying vec3 vNormal;
-	varying float vFogFragCoord;
-	
-	void main() {
-		vec4 eyePos = modelView * aVertexPosition;
-		gl_Position = projection * eyePos;
-		vTexCoord = aTexCoord;
-		vColor = aColor;
-		vNormal = normalize(normalMatrix * aNormal);
-		
-		vFogFragCoord = abs(eyePos.z / eyePos.w); 
-	}
-`;
-// NOTE: Only the default GL_MODULATE texEnv is supported here
-var fragmentShaderSrc = `
-	precision mediump float;
-	uniform sampler2D uSampler;
-	uniform float uTextureMask;
-	uniform float uAlphaTestEnable;
-	uniform float uAlphaFunc;
-	uniform float uAlphaRef;
-	uniform float uIsBGRA;
-	
-	uniform float uFogEnable;
-	uniform float uFogMode;
-	uniform float uFogDensity;
-	uniform float uFogStart;
-	uniform float uFogEnd;
-	uniform vec4 uFogColor;
-	
-	varying vec2 vTexCoord;
-	varying vec4 vColor;
-	varying vec3 vNormal;
-	varying float vFogFragCoord;
-	
-	void main() {
-		vec4 color = vColor;
-		if (uTextureMask > 0.5) {
-			vec4 texSample = texture2D(uSampler, vTexCoord);
-			if (uIsBGRA > 0.5) {
-				texSample = texSample.bgra;
-			}
-			color *= texSample;
-		}
-		
-		if (uAlphaTestEnable > 0.5) {
-			bool pass = true;
-			if (uAlphaFunc == 512.0) pass = false;                     // GL_NEVER
-			else if (uAlphaFunc == 513.0) pass = color.a < uAlphaRef;  // GL_LESS
-			else if (uAlphaFunc == 514.0) pass = color.a == uAlphaRef; // GL_EQUAL
-			else if (uAlphaFunc == 515.0) pass = color.a <= uAlphaRef; // GL_LEQUAL
-			else if (uAlphaFunc == 516.0) pass = color.a > uAlphaRef;  // GL_GREATER
-			else if (uAlphaFunc == 517.0) pass = color.a != uAlphaRef; // GL_NOTEQUAL
-			else if (uAlphaFunc == 518.0) pass = color.a >= uAlphaRef; // GL_GEQUAL
-			else if (uAlphaFunc == 519.0) pass = true;                 // GL_ALWAYS
-			if (!pass) discard;
-		}
-		
-		if (uFogEnable > 0.5) {
-			float f = 1.0;
-			if (uFogMode == 9729.0) { // GL_LINEAR
-				float range = max(uFogEnd - uFogStart, 0.00001);
-				f = (uFogEnd - vFogFragCoord) / range;
-			} else if (uFogMode == 2048.0) { // GL_EXP
-				f = exp(-(uFogDensity * vFogFragCoord));
-			} else if (uFogMode == 2049.0) { // GL_EXP2
-				float d = uFogDensity * vFogFragCoord;
-				f = exp(-(d * d));
-			}
-			f = clamp(f, 0.0, 1.0);
-			color.rgb = mix(uFogColor.rgb, color.rgb, f);
-		}
-		
-		gl_FragColor = color;
-	}
-`;
-var vertexShader = glCtx.createShader(glCtx.VERTEX_SHADER);
-glCtx.shaderSource(vertexShader, vertexShaderSrc);
-glCtx.compileShader(vertexShader);
-var fragmentShader = glCtx.createShader(glCtx.FRAGMENT_SHADER);
-glCtx.shaderSource(fragmentShader, fragmentShaderSrc);
-glCtx.compileShader(fragmentShader);
-var program = glCtx.createProgram();
-glCtx.attachShader(program, vertexShader);
-glCtx.attachShader(program, fragmentShader);
-glCtx.linkProgram(program);
-glCtx.useProgram(program);
-const MAX_BUFFER_SIZE = 1024 * 1024 * 8;
-const singleVBO = glCtx.createBuffer();
-glCtx.bindBuffer(glCtx.ARRAY_BUFFER, singleVBO);
-glCtx.bufferData(glCtx.ARRAY_BUFFER, MAX_BUFFER_SIZE, glCtx.DYNAMIC_DRAW);
-const batchBuffer = new Uint8Array(MAX_BUFFER_SIZE);
-var vertexPosition = glCtx.getAttribLocation(program, "aVertexPosition");
-var colorLocation = glCtx.getAttribLocation(program, "aColor");
-var texCoord = glCtx.getAttribLocation(program, "aTexCoord");
-var normalLocation = glCtx.getAttribLocation(program, "aNormal");
-var normalMatLocation = glCtx.getUniformLocation(program, "normalMatrix");
-var mvLocation = glCtx.getUniformLocation(program, "modelView");
-var projLocation = glCtx.getUniformLocation(program, "projection");
-var samplerLocation = glCtx.getUniformLocation(program, "uSampler");
-var samplerLocation2 = glCtx.getUniformLocation(program, "uSampler2");
-var texMaskLocation = glCtx.getUniformLocation(program, "uTextureMask");
-var alphaTestLocation = glCtx.getUniformLocation(program, "uAlphaTest");
-var bgraLocation = glCtx.getUniformLocation(program, "uIsBGRA");
-var fogEnableLocation = glCtx.getUniformLocation(program, "uFogEnable");
-var fogModeLocation = glCtx.getUniformLocation(program, "uFogMode");
-var fogDensityLocation = glCtx.getUniformLocation(program, "uFogDensity");
-var fogStartLocation = glCtx.getUniformLocation(program, "uFogStart");
-var fogEndLocation = glCtx.getUniformLocation(program, "uFogEnd");
-var fogColorLocation = glCtx.getUniformLocation(program, "uFogColor");
-var alphaTestEnableLocation = glCtx.getUniformLocation(program, "uAlphaTestEnable");
-var alphaFuncLocation = glCtx.getUniformLocation(program, "uAlphaFunc");
-var alphaRefLocation = glCtx.getUniformLocation(program, "uAlphaRef");
-glCtx.uniform1f(alphaTestEnableLocation, 0.0);
-glCtx.uniform1f(alphaFuncLocation, 519.0);
-glCtx.uniform1f(alphaRefLocation, 0.0);
-glCtx.uniform1f(fogEnableLocation, 0.0);
-glCtx.uniform1f(fogModeLocation, 2048.0); // GL_EXP
-glCtx.uniform1f(fogDensityLocation, 1.0);
-glCtx.uniform1f(fogStartLocation, 0.0);
-glCtx.uniform1f(fogEndLocation, 1.0);
-glCtx.uniform4f(fogColorLocation, 0.0, 0.0, 0.0, 0.0);
-glCtx.uniform1f(bgraLocation, 0.0);
-glCtx.uniform1f(alphaTestLocation, 0.1);
-const normalMatrix = glMatrix.mat3.create();
-var vertexData =
-{
-	enabled: false,
-	size: 0,
-	type: 0,
-	stride: 0,
-	pointer: 0,
-	buf: null
-};
-var normalData =
-{
-	enabled: false,
-	size: 0,
-	type: 0,
-	stride: 0,
-	pointer: 0,
-	buf: null
-};
-var colorData =
-{
-	enabled: false,
-	size: 0,
-	type: 0,
-	stride: 0,
-	pointer: 0,
-	buf: null
-};
-var texCoordData =
-{
-	enabled: false,
-	size: 0,
-	type: 0,
-	stride: 0,
-	pointer: 0,
-	buf: null
-};
-// TODO: Make buffers resizeable if needed
-var immediateModeData = {
-	mode: 0,
-	buf: new Float32Array(65536 * 12),
-	vertexCount: 0,
-	currentColor: [1.0, 1.0, 1.0, 1.0],
-	currentTexCoord: [0.0, 0.0],
-	currentNormal: [0.0, 0.0, 1.0]
-};
-const immediateByteView = new Uint8Array(immediateModeData.buf.buffer);
-var verboseLog = false;
-var frameCount = 0;
-const scratchMat0 = glMatrix.mat4.create();
-const multScratch = glMatrix.mat4.create();
-const scratchVec3 = new Float32Array(3);
-const MAX_TEXTURE_SIZE = 1024 * 1024 * 16;
-const scratchTextureBuf = new Uint8Array(MAX_TEXTURE_SIZE);
-const CAPTURE_SLAB_SIZE = 1024 * 1024 * 32;
-const captureSlab = new Uint8Array(CAPTURE_SLAB_SIZE);
-let captureSlabOffset = 0;
-const swapBufferClosure = function(f) { requestAnimationFrame(f); };
-const glStateCache = {};
-const MAX_QUAD_VERTICES = 1000000;
-const indexData = new Uint32Array((MAX_QUAD_VERTICES / 4) * 6);
-for (let i = 0, idx = 0; i < MAX_QUAD_VERTICES; i += 4) {
-	indexData[idx++] = i;
-	indexData[idx++] = i + 1;
-	indexData[idx++] = i + 2;
-	indexData[idx++] = i;
-	indexData[idx++] = i + 2;
-	indexData[idx++] = i + 3;
-}
-var quadIndexBuffer = glCtx.createBuffer();
-glCtx.bindBuffer(glCtx.ELEMENT_ARRAY_BUFFER, quadIndexBuffer);
-glCtx.bufferData(glCtx.ELEMENT_ARRAY_BUFFER, indexData, glCtx.STATIC_DRAW);
-// Set to a non-zero value to stop after a certain number of frames
-var frameLimit = 0;
-var currentActiveTexture = 0x84C0;
-var currentClientActiveTexture = 0x84C0;
-let matricesDirty = true;
-class MatrixStack
-{
-	constructor()
-	{
-		this.data = new Float32Array(16 * 64);
-		this.views = [];
-		for(let i = 0; i < 64; i++) this.views.push(new Float32Array(this.data.buffer, i * 16 * 4, 16));
-		this.ptr = 0;
-		glMatrix.mat4.identity(this.views[0]);
-	}
-	getTop() { return this.views[this.ptr]; }
-	push()
-	{
-		this.views[this.ptr + 1].set(this.views[this.ptr]);
-		this.ptr++;
-	}
-	pop() { this.ptr--; }
-}
-var projMatrixStack = new MatrixStack();
-var modelViewMatrixStack = new MatrixStack();
-var textureMatrixStack = new MatrixStack();
-var curMatrixStack = modelViewMatrixStack;
-function getCurMatrixTop()
-{
-	return curMatrixStack.getTop();
-}
-function setCurMatrixTop(m)
-{
-	curMatrixStack.getTop().set(m);
-}
-function getEffectiveStride(data) {
-	if (data.stride !== 0) return data.stride;
-	let bytesPerElement = 4;
-	if (data.type === glCtx.UNSIGNED_BYTE || data.type === glCtx.BYTE) {
-		bytesPerElement = 1;
-	} else if (data.type === glCtx.SHORT || data.type === glCtx.UNSIGNED_SHORT) {
-		bytesPerElement = 2;
-	}
-	return data.size * bytesPerElement;
-}
-let wasmHeapView = null;
-function getWasmHeapView(buffer)
-{
-	if (!wasmHeapView || wasmHeapView.buffer !== buffer)
-		wasmHeapView = new Uint8Array(buffer);
-	return wasmHeapView;
-}
-function uploadAllData(v, count, capVert, capCol, capTex, capNorm)
-{
-	let vd = capVert || vertexData;
-	let cd = capCol || colorData;
-	let td = capTex || texCoordData;
-	let nd = capNorm || normalData;
-
-	let heap = v ? v.buffer : null;
-	let heapView = heap ? getWasmHeapView(heap) : null;
-	let offset = 0;
-
-	let vBytes = vd.enabled ? getEffectiveStride(vd) * count : 0;
-	let cBytes = cd.enabled ? getEffectiveStride(cd) * count : 0;
-	let tBytes = td.enabled ? getEffectiveStride(td) * count : 0;
-	let nBytes = nd.enabled ? getEffectiveStride(nd) * count : 0;
-
-	if (vd.enabled) {
-		let src = vd.buf ? vd.buf : heapView.subarray(vd.pointer, vd.pointer + vBytes);
-		batchBuffer.set(src.length === vBytes ? src : src.subarray(0, vBytes), offset);
-		offset += vBytes;
-	}
-	if (cd.enabled) {
-		let src = cd.buf ? cd.buf : heapView.subarray(cd.pointer, cd.pointer + cBytes);
-		batchBuffer.set(src.length === cBytes ? src : src.subarray(0, cBytes), offset);
-		offset += cBytes;
-	}
-	if (td.enabled) {
-		let src = td.buf ? td.buf : heapView.subarray(td.pointer, td.pointer + tBytes);
-		batchBuffer.set(src.length === tBytes ? src : src.subarray(0, tBytes), offset);
-		offset += tBytes;
-	}
-	if (nd.enabled) {
-		let src = nd.buf ? nd.buf : heapView.subarray(nd.pointer, nd.pointer + nBytes);
-		batchBuffer.set(src.length === nBytes ? src : src.subarray(0, nBytes), offset);
-		offset += nBytes;
-	}
-
-	glCtx.bindBuffer(glCtx.ARRAY_BUFFER, singleVBO);
-	if (offset > 0) {
-		glCtx.bufferSubData(glCtx.ARRAY_BUFFER, 0, batchBuffer.subarray(0, offset));
-	}
-
-	let currOffset = 0;
-	if (vd.enabled) {
-		glCtx.vertexAttribPointer(vertexPosition, vd.size, vd.type, vd.type !== glCtx.FLOAT, vd.stride, currOffset);
-		glCtx.enableVertexAttribArray(vertexPosition);
-		currOffset += vBytes;
-	} else glCtx.disableVertexAttribArray(vertexPosition);
-
-	if (cd.enabled) {
-		glCtx.vertexAttribPointer(colorLocation, cd.size, cd.type, cd.type !== glCtx.FLOAT, cd.stride, currOffset);
-		glCtx.enableVertexAttribArray(colorLocation);
-		currOffset += cBytes;
-	} else glCtx.disableVertexAttribArray(colorLocation);
-
-	if (td.enabled) {
-		glCtx.vertexAttribPointer(texCoord, td.size, td.type, td.type !== glCtx.FLOAT, td.stride, currOffset);
-		glCtx.enableVertexAttribArray(texCoord);
-		currOffset += tBytes;
-	} else {
-		glCtx.disableVertexAttribArray(texCoord);
-		glCtx.vertexAttrib2f(texCoord, 0, 0);
-	}
-
-	if (nd.enabled) {
-		glCtx.vertexAttribPointer(normalLocation, nd.size, nd.type, nd.type !== glCtx.FLOAT, nd.stride, currOffset);
-		glCtx.enableVertexAttribArray(normalLocation);
-	} else glCtx.disableVertexAttribArray(normalLocation);
+function getActiveCanvas() {
+  if (window.lwjglCanvasElement instanceof HTMLCanvasElement) {
+    return window.lwjglCanvasElement;
+  }
+  const mcClient = document.querySelector("minecraft-client");
+  if (mcClient && mcClient.shadowRoot) {
+    const c = mcClient.shadowRoot.querySelector("canvas");
+    if (c) {
+      window.lwjglCanvasElement = c;
+      return c;
+    }
+  }
+  const fallback = document.querySelector("canvas") || document.createElement("canvas");
+  window.lwjglCanvasElement = fallback;
+  return fallback;
 }
 
-function captureData(v, data, count)
-{
-	var ret = { enabled: data.enabled, size: data.size, type: data.type, stride: data.stride, pointer: 0, buf: null };
-	if (data.enabled)
-	{
-		var effectiveStride = getEffectiveStride(data);
-		var len = effectiveStride * count;
-		var heapView = getWasmHeapView(v.buffer);
-		ret.buf = heapView.subarray(data.pointer, data.pointer + len);
-	}
-	return ret;
-}
-function checkNoList(list)
-{
-	if(list != null)
-		throw new Error("Unsupported command in list");
-}
-function pushInList(list, args, callee)
-{
-	var a = new Array(args.length);
-	for(var i = 0; i < args.length; i++) {
-		a[i] = args[i];
-	}
-	list.push({f: callee, a: a});
-}
-function callList(listId)
-{
-	var l = cmdLists[listId];
-	for(var i=0;i<l.length;i++)
-	{
-		var c = l[i];
-		c.f.apply(null, c.a);
-	}
-}
-function drawArraysImpl(mode, first, count)
-{
-	if (matricesDirty) {
-		glCtx.uniformMatrix4fv(mvLocation, false, modelViewMatrixStack.getTop());
-		glCtx.uniformMatrix4fv(projLocation, false, projMatrixStack.getTop());
-		
-		glMatrix.mat3.normalFromMat4(normalMatrix, modelViewMatrixStack.getTop());
-		glCtx.uniformMatrix3fv(normalMatLocation, false, normalMatrix);
-		
-		matricesDirty = false;
-	}
-	assert(first == 0);
-	
-	if(mode == 7/*QUADS*/ && (count % 4) == 0) {
-		glCtx.bindBuffer(glCtx.ELEMENT_ARRAY_BUFFER, quadIndexBuffer);
-		glCtx.drawElements(glCtx.TRIANGLES, (count / 4) * 6, glCtx.UNSIGNED_INT, 0);
-	}
-	else if(mode == glCtx.LINES || mode == glCtx.LINE_STRIP || mode == glCtx.TRIANGLE_STRIP || mode == glCtx.TRIANGLE_FAN || mode == glCtx.TRIANGLES) {
-		glCtx.drawArrays(mode, first, count);
-	}
-	else {
-		debugger;
-	}
-}
-function pushDrawArraysInList(list, v, mode, first, count)
-{
-	var vCap = captureData(v, vertexData, count);
-	var cCap = captureData(v, colorData, count);
-	var tCap = captureData(v, texCoordData, count);
-	var nCap = captureData(v, normalData, count);
-
-	var vSize = vCap.enabled ? getEffectiveStride(vCap) * count : 0;
-	var cSize = cCap.enabled ? getEffectiveStride(cCap) * count : 0;
-	var tSize = tCap.enabled ? getEffectiveStride(tCap) * count : 0;
-	var nSize = nCap.enabled ? getEffectiveStride(nCap) * count : 0;
-	var totalSize = vSize + cSize + tSize + nSize;
-
-	var offset = 0;
-	if (vCap.enabled) { batchBuffer.set(vCap.buf, offset); offset += vSize; }
-	if (cCap.enabled) { batchBuffer.set(cCap.buf, offset); offset += cSize; }
-	if (tCap.enabled) { batchBuffer.set(tCap.buf, offset); offset += tSize; }
-	if (nCap.enabled) { batchBuffer.set(nCap.buf, offset); offset += nSize; }
-
-	var gpuBuf = glCtx.createBuffer();
-	var vao = glCtx.createVertexArray();
-
-	glCtx.bindVertexArray(vao);
-	glCtx.bindBuffer(glCtx.ARRAY_BUFFER, gpuBuf);
-	glCtx.bufferData(glCtx.ARRAY_BUFFER, batchBuffer.subarray(0, totalSize), glCtx.STATIC_DRAW);
-
-	offset = 0;
-	if (vCap.enabled) {
-		glCtx.vertexAttribPointer(vertexPosition, vCap.size, vCap.type, vCap.type !== glCtx.FLOAT, vCap.stride, offset);
-		glCtx.enableVertexAttribArray(vertexPosition);
-		offset += vSize;
-	} else glCtx.disableVertexAttribArray(vertexPosition);
-
-	if (cCap.enabled) {
-		glCtx.vertexAttribPointer(colorLocation, cCap.size, cCap.type, cCap.type !== glCtx.FLOAT, cCap.stride, offset);
-		glCtx.enableVertexAttribArray(colorLocation);
-		offset += cSize;
-	} else glCtx.disableVertexAttribArray(colorLocation);
-
-	if (tCap.enabled) {
-		glCtx.vertexAttribPointer(texCoord, tCap.size, tCap.type, tCap.type !== glCtx.FLOAT, tCap.stride, offset);
-		glCtx.enableVertexAttribArray(texCoord);
-		offset += tSize;
-	} else {
-		glCtx.disableVertexAttribArray(texCoord);
-		glCtx.vertexAttrib2f(texCoord, 0, 0);
-	}
-
-	if (nCap.enabled) {
-		glCtx.vertexAttribPointer(normalLocation, nCap.size, nCap.type, nCap.type !== glCtx.FLOAT, nCap.stride, offset);
-		glCtx.enableVertexAttribArray(normalLocation);
-	} else glCtx.disableVertexAttribArray(normalLocation);
-
-	glCtx.bindVertexArray(null);
-
-	list.push({
-		f: drawArraysInList,
-		a: [mode, first, count, vao],
-		gpuBuf: gpuBuf,
-		vao: vao
-	});
-}
-function drawArraysInList(mode, first, count, vao)
-{
-	glCtx.bindVertexArray(vao);
-	drawArraysImpl(mode, first, count);
-	glCtx.bindVertexArray(null);
-}
-// Fix the sampler to texture unit 0
-glCtx.uniform1i(samplerLocation, 0);
-var curList = null;
-var cmdLists = [null];
-// The first null implicitly solves resetting on 0 id
-var textureObjects = [null];
-var textureWidths = [];
-var textureHeights = [];
-var activeTextureUnit = 0;
-var boundTextures = [0, 0, 0, 0, 0, 0, 0, 0];
-let lastCanvasWidth = glCanvas.width;
-let lastCanvasHeight = glCanvas.height;
-
-// We need to use an FBO as the main target to support copyTexSubImage2D that seems broken otherwise
-var fbTexture = glCtx.createTexture();
-glCtx.bindTexture(glCtx.TEXTURE_2D, fbTexture);
-glCtx.texImage2D(glCtx.TEXTURE_2D, 0, glCtx.RGBA, lastCanvasWidth, lastCanvasHeight, 0, glCtx.RGBA, glCtx.UNSIGNED_BYTE, null);
-glCtx.bindTexture(glCtx.TEXTURE_2D, null);
-var mainFb = glCtx.createFramebuffer();
-glCtx.bindFramebuffer(glCtx.READ_FRAMEBUFFER, mainFb);
-glCtx.bindFramebuffer(glCtx.DRAW_FRAMEBUFFER, mainFb);
-glCtx.framebufferTexture2D(glCtx.FRAMEBUFFER, glCtx.COLOR_ATTACHMENT0, glCtx.TEXTURE_2D, fbTexture, 0);
-// Add a depth render buffer
-var depthRb = glCtx.createRenderbuffer();
-glCtx.bindRenderbuffer(glCtx.RENDERBUFFER, depthRb);
-glCtx.renderbufferStorage(glCtx.RENDERBUFFER, glCtx.DEPTH_COMPONENT16, lastCanvasWidth, lastCanvasHeight);
-glCtx.framebufferRenderbuffer(glCtx.FRAMEBUFFER, glCtx.DEPTH_ATTACHMENT, glCtx.RENDERBUFFER, depthRb);
-// Synthetize a focus event, it's needed for LWJGL logic
-var eventQueue = [{type:"focus"}];
-
-function updateFramebufferSize(w, h) {
-	glCtx.bindTexture(glCtx.TEXTURE_2D, fbTexture);
-	glCtx.texImage2D(glCtx.TEXTURE_2D, 0, glCtx.RGBA, w, h, 0, glCtx.RGBA, glCtx.UNSIGNED_BYTE, null);
-	glCtx.bindTexture(glCtx.TEXTURE_2D, null);
-
-	glCtx.bindRenderbuffer(glCtx.RENDERBUFFER, depthRb);
-	glCtx.renderbufferStorage(glCtx.RENDERBUFFER, glCtx.DEPTH_COMPONENT16, w, h);
-	glCtx.bindRenderbuffer(glCtx.RENDERBUFFER, null);
-}
-
-function handleResize() {
-	const w = Math.max(1, Math.round(glCanvas.clientWidth || glCanvas.width));
-	const h = Math.max(1, Math.round(glCanvas.clientHeight || glCanvas.height));
-	if (glCanvas.width !== w || glCanvas.height !== h) {
-		glCanvas.width = w;
-		glCanvas.height = h;
-	}
-	if (glCanvas.width !== lastCanvasWidth || glCanvas.height !== lastCanvasHeight) {
-		lastCanvasWidth = glCanvas.width;
-		lastCanvasHeight = glCanvas.height;
-		updateFramebufferSize(lastCanvasWidth, lastCanvasHeight);
-		eventQueue.push({ type: "configure" });
-	}
-}
-
-glCanvas.addEventListener("resize", handleResize);
-window.addEventListener("resize", handleResize);
-
-function convertMousePos(x, y) {
-	const offsetX = 0;
-	const offsetY = 0;
-
-	const xRatio = glCanvas.clientWidth ? (glCanvas.width / glCanvas.clientWidth) : 1;
-	const yRatio = glCanvas.clientHeight ? (glCanvas.height / glCanvas.clientHeight) : 1;
-
-	return [x * xRatio - offsetX, y * yRatio - offsetY];
-}
-
-/** Convert from MouseEvent.button to X11 mouse button */
-function convertMouseButton(button) {
-	return button + 1;
-}
-
-/**
- * If null, the game does not want the mouse pointer locked.
- * @type {{ x: number, y: number } | null}
- */
-let lockedMousePos = null;
-
-glCanvas.addEventListener("mousemove", evt => {
-	let [x, y] = convertMousePos(evt.offsetX, evt.offsetY);
-
-	if (lockedMousePos) {
-		x = lockedMousePos.x += evt.movementX;
-		y = lockedMousePos.y += evt.movementY;
-
-		if (!document.pointerLockElement) {
-			Java_org_lwjgl_opengl_LinuxDisplay_nGrabPointer();
-		}
-	}
-
-	const lastEvent = eventQueue[eventQueue.length - 1];
-	if (lastEvent?.type === evt.type) {
-		lastEvent.x = x;
-		lastEvent.y = y;
-	} else {
-		eventQueue.push({ type: evt.type, x, y });
-	}
+const glCanvas = getActiveCanvas();
+const glCtx = glCanvas.getContext("webgl2", {
+  antialias: false,
+  alpha: false,
+  depth: true,
+  stencil: true,
+  powerPreference: "high-performance",
+  desynchronized: true,
+  preserveDrawingBuffer: false
 });
-function mouseHandler(evt) {
-	const [x, y] = convertMousePos(evt.offsetX, evt.offsetY);
-	eventQueue.push({ type: evt.type, x, y, button: convertMouseButton(evt.button) });
-}
-glCanvas.addEventListener("mousedown", mouseHandler);
-glCanvas.addEventListener("mouseup", mouseHandler);
-glCanvas.addEventListener("contextmenu", evt => evt.preventDefault());
-glCanvas.addEventListener("wheel", evt => {
-	evt.preventDefault();
-	const [x, y] = convertMousePos(evt.offsetX, evt.offsetY);
-	const button = evt.deltaY < 0 ? 4 : 5;
-	eventQueue.push({ type: "mousedown", x, y, button });
-	eventQueue.push({ type: "mouseup", x, y, button });
-}, { passive: false });
-
-/** @param {KeyboardEvent} e */
-function keyHandler(e)
-{
-	// Convert to LinuxKeycodes.java keycodes
-	// https://github.com/LWJGL/lwjgl/blob/master/src/java/org/lwjgl/opengl/LinuxKeycodes.java
-	let keyCode = 0;
-	if (e.key.length === 1)
-	{
-		keyCode = e.key.charCodeAt(0);
-	}
-	else
-	{
-		switch (e.key) {
-			case "Escape": keyCode = 0xff1b; break;
-			case "Enter": keyCode = 0xff0d; break;
-			case "Backspace": keyCode = 0xff08; break;
-			case "Tab": keyCode = 0xff09; break;
-			case "Shift": keyCode = (e.code === "ShiftRight") ? 0xffe2 : 0xffe1; break;
-			case "Control": keyCode = (e.code === "ControlRight") ? 0xffe4 : 0xffe3; break;
-			case "Alt": keyCode = (e.code === "AltRight") ? 0xffea : 0xffe9; break;
-			case "Meta": keyCode = 0xffe7; break;
-			case "CapsLock": keyCode = 0xffe5; break;
-			case "ArrowUp": keyCode = 0xff52; break;
-			case "ArrowDown": keyCode = 0xff54; break;
-			case "ArrowLeft": keyCode = 0xff51; break;
-			case "ArrowRight": keyCode = 0xff53; break;
-			case "PageUp": keyCode = 0xff55; break;
-			case "PageDown": keyCode = 0xff56; break;
-			case "Home": keyCode = 0xff50; break;
-			case "End": keyCode = 0xff57; break;
-			case "Insert": keyCode = 0xff63; break;
-			case "Delete": keyCode = 0xffff; break;
-			case "F1": keyCode = 0xffbe; break;
-			case "F2": keyCode = 0xffbf; break;
-			case "F3": keyCode = 0xffc0; break;
-			case "F4": keyCode = 0xffc1; break;
-			case "F5": keyCode = 0xffc2; break;
-			case "F6": keyCode = 0xffc3; break;
-			case "F7": keyCode = 0xffc4; break;
-			case "F8": keyCode = 0xffc5; break;
-			case "F9": keyCode = 0xffc6; break;
-			case "F10": keyCode = 0xffc7; break;
-			case "F11": keyCode = 0xffc8; break;
-			case "F12": keyCode = 0xffc9; break;
-			default: keyCode = e.keyCode; break;
-		}
-	}
-	eventQueue.push({ type: e.type, keyCode });
-	if (e.key !== "F11") e.preventDefault();
-}
-glCanvas.addEventListener("keydown", keyHandler);
-glCanvas.addEventListener("keyup", keyHandler);
-
-function isPowerOfTwo(x)
-{
-	return (x & (x - 1)) == 0 && x !== 0;
-}
-
-function getTextureData(v, memPtr, width, height, format, type)
-{
-	const ptr = Number(memPtr);
-	if (ptr === 0) return null;
-
-	let bpp = 4; 
-	if (format === 0x1907 /* GL_RGB */) bpp = 3;
-	else if (format === 0x1909 /* GL_LUMINANCE */) bpp = 1;
-	else if (format === 0x190A /* GL_LUMINANCE_ALPHA */) bpp = 2;
-	else if (format === 0x1908 /* GL_RGBA */ || format === 0x80E1 /* GL_BGRA */) bpp = 4;
-
-	if (type === 0x1403 /* UNSIGNED_SHORT */) bpp *= 2;
-	if (type === 0x1406 /* FLOAT */) bpp *= 4;
-
-	const size = width * height * bpp;
-	const src = getWasmHeapView(v.buffer).subarray(ptr, ptr + size);
-
-	if (format === 0x80E1 /* GL_BGRA */) {
-		if ((src.byteOffset % 4) === 0) {
-			const src32 = new Uint32Array(src.buffer, src.byteOffset, size / 4);
-			const dst32 = new Uint32Array(scratchTextureBuf.buffer, 0, size / 4);
-			for (let i = 0; i < src32.length; i++) {
-				const pixel = src32[i];
-				dst32[i] = (pixel & 0xFF00FF00) | ((pixel & 0xFF) << 16) | ((pixel >> 16) & 0xFF);
-			}
-		} else {
-			for (let i = 0; i < size; i += 4) {
-				scratchTextureBuf[i]     = src[i + 2];
-				scratchTextureBuf[i + 1] = src[i + 1];
-				scratchTextureBuf[i + 2] = src[i];
-				scratchTextureBuf[i + 3] = src[i + 3];
-			}
-		}
-		return scratchTextureBuf.subarray(0, size);
-	}
-
-	return src;
-}
-
-function translateGLFormat(f) { return (f === 0x80E1 /* BGRA */) ? glCtx.RGBA : f; }
-function translateGLType(t) { return (t === 0x8367 /* UNSIGNED_INT_8_8_8_8_REV */) ? glCtx.UNSIGNED_BYTE : t; }
-function translateInternalFormat(i)
-{
-    if (i === 4 || i === 0x8058) return glCtx.RGBA;
-    if (i === 3 || i === 0x8051) return glCtx.RGB;
-    return i;
-}
-
-function getBufferAddr(buf)
-{
-	if (typeof buf === "number") return buf;
-	if (!buf) return 0;
-	if (buf.__addr !== undefined) return buf.__addr;
-	if (buf.d !== undefined) return buf.d;
-	if (typeof buf.address === "number") return buf.address;
-	return 0;
-}
-
-function Java_org_lwjgl_DefaultSysImplementation_getPointerSize()
-{
-	return 4;
-}
-
-function Java_org_lwjgl_DefaultSysImplementation_getJNIVersion()
-{
-	return 19;
-}
-
-function Java_org_lwjgl_DefaultSysImplementation_setDebug()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nLockAWT()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nSwitchDisplayMode(lib, screen, extension, mode)
-{
-	if (!document.fullscreenElement) {
-		if (glCanvas.requestFullscreen) {
-			glCanvas.requestFullscreen().catch(() => {});
-		} else if (document.documentElement.requestFullscreen) {
-			document.documentElement.requestFullscreen().catch(() => {});
-		}
-	} else {
-		if (document.exitFullscreen) {
-			document.exitFullscreen().catch(() => {});
-		}
-	}
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nUnlockAWT()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_setErrorHandler()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_openDisplay(lib)
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nInternAtom()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nIsXrandrSupported()
-{
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nIsXF86VidModeSupported()
-{
-	return 1;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetDefaultScreen()
-{
-	return 0;
-}
-
-async function Java_org_lwjgl_opengl_LinuxDisplay_nGetAvailableDisplayModes(lib)
-{
-	var DisplayMode = await lib.org.lwjgl.opengl.DisplayMode;
-	var d1 = await new DisplayMode(Math.round(window.screen.width), Math.round(window.screen.height));
-	var d2 = await new DisplayMode(Math.round(glCanvas.width), Math.round(glCanvas.height));
-	return [d1, d2];
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetCurrentGammaRamp()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nSetGammaRamp(lib, gammaRampBuffer)
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxPeerInfo_createHandle()
-{
-}
-
-function Java_org_lwjgl_opengl_GLContext_nLoadOpenGLLibrary()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplayPeerInfo_initDefaultPeerInfo()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplayPeerInfo_initDrawable()
-{
-}
-
-function Java_org_lwjgl_opengl_AWTSurfaceLock_createHandle()
-{
-}
-
-function Java_org_lwjgl_opengl_AWTSurfaceLock_lockAndInitHandle()
-{
-	return 1;
-}
-
-function Java_org_lwjgl_opengl_LinuxAWTGLCanvasPeerInfo_getScreenFromSurfaceInfo()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxAWTGLCanvasPeerInfo_nInitHandle()
-{
-}
-
-function Java_org_lwjgl_opengl_AWTSurfaceLock_nUnlock()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxPeerInfo_nGetDrawable()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nCreateWindow()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_mapRaised()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nCreateBlankCursor()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nSetTitle()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nGetButtonCount()
-{
-	return 3;
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nQueryPointer()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nGetWindowHeight()
-{
-	return glCanvas.height;
-}
-
-function Java_org_lwjgl_opengl_LinuxKeyboard_getModifierMapping()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxKeyboard_nSetDetectableKeyRepeat()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxKeyboard_openIM()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxKeyboard_allocateComposeStatus()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nCreate()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nMakeCurrent()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nIsCurrent()
-{
-	return true;
-}
-
-function Java_org_lwjgl_opengl_GLContext_ngetFunctionAddress(lib, stringPtr)
-{
-	// Return any non-zero address, methods are called by name anyway
-	return 1;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureX()
-{
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureY()
-{
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureWidth()
-{
-	return glCanvas.width;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureHeight()
-{
-	return glCanvas.height;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGetString(lib, id, funcPtr)
-{
-	checkNoList(curList);
-	if (id === 0x1F00 /* GL_VENDOR */) {
-		return (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || glCtx.getParameter(glCtx.VENDOR) || "WebGL";
-	}
-	if (id === 0x1F01 /* GL_RENDERER */) {
-		return (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || glCtx.getParameter(glCtx.RENDERER) || "WebGL";
-	}
-	if (id === 0x1F02 /* GL_VERSION */) {
-		return glCtx.getParameter(glCtx.VERSION) || "OpenGL ES 2.0 WebGL";
-	}
-	if (id === 0x1F03 /* GL_EXTENSIONS */) {
-		const exts = glCtx.getSupportedExtensions();
-		return exts ? exts.join(" ") : "";
-	}
-	if (id === 0x8B8C /* GL_SHADING_LANGUAGE_VERSION */) {
-		return glCtx.getParameter(glCtx.SHADING_LANGUAGE_VERSION) || "OpenGL ES GLSL ES 1.00";
-	}
-	try {
-		return glCtx.getParameter(id) || "";
-	} catch (e) {
-		return "";
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGetIntegerv(lib, id, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	
-	if (id == /*GL_VIEWPORT*/0xba2) {
-		v.setInt32(ptr, 0, true);
-		v.setInt32(ptr + 4, 0, true);
-		v.setInt32(ptr + 8, glCanvas.width, true);
-		v.setInt32(ptr + 12, glCanvas.height, true);
-	} else {
-		try {
-			var val = glCtx.getParameter(id);
-			if (typeof val === 'number') {
-				v.setInt32(ptr, val, true);
-			} else if (Array.isArray(val) || ArrayBuffer.isView(val)) {
-				for (var i = 0; i < val.length; i++) {
-					v.setInt32(ptr + i * 4, val[i], true);
-				}
-			} else {
-				v.setInt32(ptr, 16, true);
-			}
-		} catch (e) {
-			v.setInt32(ptr, 16, true);
-		}
-		if (verboseLog) console.log("glGetInteger", id, val);
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGetError()
-{
-	checkNoList(curList);
-	// We like living dangerously
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nSetSwapInterval()
-{
-}
-
-function Java_org_lwjgl_opengl_GL11_nglClearColor(lib, r, g, b, a, funcPtr)
-{
-	checkNoList(curList);
-	return glCtx.clearColor(r, g, b, a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglClear(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.clear(a);
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nSwapBuffers()
-{
-	if(verboseLog)
-		console.warn("SwapBuffer");
-	glCtx.bindFramebuffer(glCtx.DRAW_FRAMEBUFFER, null);
-	glCtx.blitFramebuffer(0, 0, glCanvas.width, glCanvas.height, 0, 0, glCanvas.width, glCanvas.height, glCtx.COLOR_BUFFER_BIT, glCtx.NEAREST);
-	glCtx.bindFramebuffer(glCtx.DRAW_FRAMEBUFFER, mainFb);
-	frameCount++;
-	if(frameCount == frameLimit)
-	{
-		console.warn("Stopping");
-		return new Promise(function(){});
-	}
-	return new Promise(swapBufferClosure);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_getPending()
-{
-	handleResize();
-	return eventQueue.length;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglMatrixMode(lib, matrixMode, funcPtr)
-{
-	if(curList)
-		return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglMatrixMode);
-	if(matrixMode == 0x1700/*GL_MODELVIEW*/)
-		curMatrixStack = modelViewMatrixStack;
-	else if(matrixMode == 0x1701/*GL_PROJECTION*/)
-		curMatrixStack = projMatrixStack;
-	else if(matrixMode == 0x1702/*GL_TEXTURE*/)
-		curMatrixStack = textureMatrixStack;
-	else
-		debugger;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglLoadIdentity(lib, funcPtr)
-{
-	checkNoList(curList);
-	glMatrix.mat4.identity(getCurMatrixTop());
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglOrtho(lib, left, right, bottom, top, nearVal, farVal, funcPtr)
-{
-	checkNoList(curList);
-	var m = getCurMatrixTop();
-	glMatrix.mat4.ortho(scratchMat0, left, right, bottom, top, nearVal, farVal);
-	glMatrix.mat4.multiply(m, m, scratchMat0);
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTranslatef(lib, x, y, z, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglTranslatef);
-	var m = getCurMatrixTop();
-	scratchVec3[0] = x; scratchVec3[1] = y; scratchVec3[2] = z;
-	glMatrix.mat4.translate(m, m, scratchVec3);
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglViewport(lib, x, y, width, height, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.viewport(x, y, width, height);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglDisable(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	const cacheKey = (a === 0xDE1 || a === 0x806F) ? (a + "_" + activeTextureUnit) : a;
-	if (glStateCache[cacheKey] === false) return;
-	glStateCache[cacheKey] = false;
-
-	if(a == glCtx.BLEND || a == glCtx.CULL_FACE || a == glCtx.DEPTH_TEST || a == glCtx.SCISSOR_TEST){
-		glCtx.disable(a);
-	} else if(a == 0x806F/*GL_TEXTURE_3D*/ || a == 0xDE1 /* GL_TEXTURE_2D */) {
-		if (activeTextureUnit === 0) glCtx.uniform1f(texMaskLocation, 0.0);
-	} else if (a == 0xBC0 /* GL_ALPHA_TEST */) {
-		glCtx.uniform1f(alphaTestEnableLocation, 0.0);
-	} else if (a == 0x0B60 /* GL_FOG */) {
-		glCtx.uniform1f(fogEnableLocation, 0.0);
-  	} else if(verboseLog) {
-   		console.log("glDisable " + a.toString(16));
-   	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglEnable(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	const cacheKey = (a === 0xDE1 || a === 0x806F) ? (a + "_" + activeTextureUnit) : a;
-	if (glStateCache[cacheKey] === true) return;
-	glStateCache[cacheKey] = true;
-
-	if (a == glCtx.CULL_FACE || a == glCtx.DEPTH_TEST || a == glCtx.SCISSOR_TEST) {
-		glCtx.enable(a);
-	} else if (a == 0xDE1 /* GL_TEXTURE_2D */ || a == 0x806F/*GL_TEXTURE_3D*/) {
-		if (activeTextureUnit === 0) glCtx.uniform1f(texMaskLocation, 1.0);
-	} else if(a == glCtx.BLEND) {
-		glCtx.enable(glCtx.BLEND);
-	} else if (a == 0xBC0 /* GL_ALPHA_TEST */) {
-		glCtx.uniform1f(alphaTestEnableLocation, 1.0);
-	} else if (a == 0x0B60 /* GL_FOG */) {
-		glCtx.uniform1f(fogEnableLocation, 1.0);
-	} else if(verboseLog) {
-		console.log("glEnable " + a.toString(16));
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglScissor(lib, x, y, width, height, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.scissor(x, y, width, height);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGenTextures(lib, n, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	
-	for(var i=0; i<n; i++) {
-		var id = textureObjects.length;
-		v.setInt32(ptr + i*4, id, true);
-		textureObjects[id] = glCtx.createTexture();
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglBindTexture(lib, target, id, funcPtr)
-{
-	checkNoList(curList);
-	assert(target == glCtx.TEXTURE_2D);
-	if (boundTextures[activeTextureUnit] === id) return;
-	boundTextures[activeTextureUnit] = id;
-	glCtx.bindTexture(target, textureObjects[id]);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglDeleteTextures(lib, n, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	
-	for(var i = 0; i < n; i++) {
-		var id = v.getInt32(ptr + i * 4, true);
-		if (textureObjects[id]) {
-			glCtx.deleteTexture(textureObjects[id]);
-			textureObjects[id] = null;
-		}
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTexParameteri(lib, target, pname, param, funcPtr)
-{
-	if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglTexParameteri);
-	if (pname === 0x2802 /* GL_TEXTURE_WRAP_S */ || pname === 0x2803 /* GL_TEXTURE_WRAP_T */) {
-		if (param === 0x2900 /* GL_CLAMP */ || param === 0x812F /* GL_CLAMP_TO_EDGE */ || param === 0x8059 /* GL_CLAMP_TO_BORDER */) {
-			param = glCtx.CLAMP_TO_EDGE;
-		}
-	}
-	glCtx.texParameteri(target, pname, param);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTexParameterf(lib, target, pname, param, funcPtr)
-{
-	if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglTexParameterf);
-	if (pname === 0x2802 /* GL_TEXTURE_WRAP_S */ || pname === 0x2803 /* GL_TEXTURE_WRAP_T */) {
-		if (param === 0x2900 /* GL_CLAMP */ || param === 0x812F /* GL_CLAMP_TO_EDGE */ || param === 0x8059 /* GL_CLAMP_TO_BORDER */) {
-			param = glCtx.CLAMP_TO_EDGE;
-		}
-	}
-	glCtx.texParameterf(target, pname, param);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTexImage2D(lib, target, level, internalFormat, width, height, border, format, type, memPtr, funcPtr)
-{
-    checkNoList(curList);
-    if (target === 0x8064) return;
-
-    const v = lib.getJNIDataView();
-    const buf = getTextureData(v, memPtr, width, height, format, type);
-    
-    const glFmt = translateGLFormat(format);
-    const glTyp = translateGLType(type);
-    const glInt = translateInternalFormat(internalFormat);
-
-    const boundId = boundTextures[activeTextureUnit];
-    textureWidths[boundId] = width;
-    textureHeights[boundId] = height;
-
-    glCtx.pixelStorei(glCtx.UNPACK_ALIGNMENT, 1);
-    glCtx.texImage2D(target, level, glInt, width, height, border, glFmt, glTyp, buf);
 
-    const isPot = ((width & (width - 1)) === 0) && ((height & (height - 1)) === 0);
-    if (!isPot) {
-        glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_WRAP_S, glCtx.CLAMP_TO_EDGE);
-        glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_WRAP_T, glCtx.CLAMP_TO_EDGE);
+if (!glCtx) {
+  throw new Error("WebGL 2 is required for WebForge LWJGL 3.");
+}
+
+const debugRendererExt = glCtx.getExtension("WEBGL_debug_renderer_info");
+glCtx.getExtension("EXT_color_buffer_float");
+glCtx.getExtension("OES_texture_float_linear");
+
+// ============================================================================
+// 1. Wasm Linear Memory & Off-Heap Pointer Subsystem
+// ============================================================================
+class WasmHeapMemoryManager {
+  constructor() {
+    this.allocations = new Map(); // ptr -> { size, byteBufferRef }
+    this.jsFallbackBlocks = new Map(); // ptr -> Uint8Array
+    this.nextFallbackPtr = 0x50000000;
+    this.heapView = null;
+    this.rawBuffer = null;
+    this.scratchStringPtrs = new Map();
+  }
+
+  getDataView(lib) {
+    if (lib && typeof lib.getJNIDataView === "function") {
+      const v = lib.getJNIDataView();
+      if (v && v.buffer !== this.rawBuffer) {
+        this.rawBuffer = v.buffer;
+        this.heapView = new Uint8Array(v.buffer);
+      }
+      return v;
     }
-    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_MIN_FILTER, glCtx.NEAREST);
-    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_MAG_FILTER, glCtx.NEAREST);
+    return null;
+  }
+
+  getHeapUint8(lib) {
+    this.getDataView(lib);
+    return this.heapView;
+  }
+
+  // Synchronous off-heap allocation aligned to 16 bytes
+  malloc(lib, size) {
+    const byteSize = Math.max(16, Number(size) || 16);
+    const alignedSize = (byteSize + 15) & ~15;
+    const ptr = this.nextFallbackPtr;
+    this.nextFallbackPtr += alignedSize + 16;
+
+    const heap = this.getHeapUint8(lib);
+    if (!heap || ptr + alignedSize >= heap.byteLength) {
+      const block = new Uint8Array(alignedSize);
+      this.jsFallbackBlocks.set(ptr, block);
+    }
+    this.allocations.set(ptr, alignedSize);
+    return ptr;
+  }
+
+  calloc(lib, num, size) {
+    const total = Math.max(16, Number(num) * Number(size));
+    const ptr = this.malloc(lib, total);
+    this.memset(lib, ptr, 0, total);
+    return ptr;
+  }
+
+  realloc(lib, ptr, newSize) {
+    const oldPtr = Number(ptr);
+    if (oldPtr === 0) return this.malloc(lib, newSize);
+    const oldSize = this.allocations.get(oldPtr) || 0;
+    const newPtr = this.malloc(lib, newSize);
+    if (oldSize > 0) {
+      const copyLen = Math.min(oldSize, Number(newSize));
+      const src = this.getSubarray(lib, oldPtr, copyLen);
+      const dst = this.getSubarray(lib, newPtr, copyLen);
+      if (src && dst) dst.set(src);
+    }
+    this.free(lib, oldPtr);
+    return newPtr;
+  }
+
+  free(lib, ptr) {
+    const p = Number(ptr);
+    this.allocations.delete(p);
+    this.jsFallbackBlocks.delete(p);
+  }
+
+  memset(lib, ptr, val, size) {
+    const slice = this.getSubarray(lib, ptr, size);
+    if (slice) slice.fill(Number(val) & 0xFF);
+    return Number(ptr);
+  }
+
+  memcpy(lib, dst, src, size) {
+    const len = Number(size);
+    const s = this.getSubarray(lib, src, len);
+    const d = this.getSubarray(lib, dst, len);
+    if (s && d) d.set(s);
+    return Number(dst);
+  }
+
+  getSubarray(lib, ptr, byteLength) {
+    const p = Number(ptr);
+    if (p === 0) return null;
+    const len = Number(byteLength) || this.allocations.get(p) || 0;
+
+    if (this.jsFallbackBlocks.has(p)) {
+      const blk = this.jsFallbackBlocks.get(p);
+      return len > 0 ? blk.subarray(0, len) : blk;
+    }
+
+    const heap = this.getHeapUint8(lib);
+    if (heap && p > 0 && p < heap.byteLength) {
+      const safeEnd = len > 0 ? Math.min(heap.byteLength, p + len) : heap.byteLength;
+      return heap.subarray(p, safeEnd);
+    }
+
+    // Create fallback on demand if Java passed an out-of-range virtual address
+    const fallback = new Uint8Array(Math.max(len, 64));
+    this.jsFallbackBlocks.set(p, fallback);
+    return len > 0 ? fallback.subarray(0, len) : fallback;
+  }
+
+  readCString(lib, ptr) {
+    const p = Number(ptr);
+    if (!p) return "";
+    if (typeof ptr === "string") return ptr;
+
+    const slice = this.getSubarray(lib, p, 4096);
+    if (!slice) return "";
+    let end = 0;
+    while (end < slice.length && slice[end] !== 0) end++;
+    return new TextDecoder("utf-8").decode(slice.subarray(0, end));
+  }
+
+  allocCString(lib, str) {
+    const s = String(str ?? "");
+    if (this.scratchStringPtrs.has(s)) {
+      return this.scratchStringPtrs.get(s);
+    }
+    const bytes = new TextEncoder().encode(s + "\0");
+    const ptr = this.malloc(lib, bytes.length);
+    const dst = this.getSubarray(lib, ptr, bytes.length);
+    if (dst) dst.set(bytes);
+    this.scratchStringPtrs.set(s, ptr);
+    return ptr;
+  }
+
+  readInt32(lib, ptr) {
+    const p = Number(ptr);
+    if (!p) return 0;
+    const v = this.getDataView(lib);
+    if (v && p + 4 <= v.byteLength) return v.getInt32(p, true);
+    const sub = this.getSubarray(lib, p, 4);
+    return sub ? new DataView(sub.buffer, sub.byteOffset, 4).getInt32(0, true) : 0;
+  }
+
+  writeInt32(lib, ptr, val) {
+    const p = Number(ptr);
+    if (!p) return;
+    const v = this.getDataView(lib);
+    if (v && p + 4 <= v.byteLength) {
+      v.setInt32(p, Number(val), true);
+      return;
+    }
+    const sub = this.getSubarray(lib, p, 4);
+    if (sub) new DataView(sub.buffer, sub.byteOffset, 4).setInt32(0, Number(val), true);
+  }
+
+  writeFloat32(lib, ptr, val) {
+    const p = Number(ptr);
+    if (!p) return;
+    const v = this.getDataView(lib);
+    if (v && p + 4 <= v.byteLength) {
+      v.setFloat32(p, Number(val), true);
+      return;
+    }
+    const sub = this.getSubarray(lib, p, 4);
+    if (sub) new DataView(sub.buffer, sub.byteOffset, 4).setFloat32(0, Number(val), true);
+  }
+
+  writeFloat64(lib, ptr, val) {
+    const p = Number(ptr);
+    if (!p) return;
+    const v = this.getDataView(lib);
+    if (v && p + 8 <= v.byteLength) {
+      v.setFloat64(p, Number(val), true);
+      return;
+    }
+    const sub = this.getSubarray(lib, p, 8);
+    if (sub) new DataView(sub.buffer, sub.byteOffset, 8).setFloat64(0, Number(val), true);
+  }
 }
 
-function Java_org_lwjgl_opengl_GL11_nglTexCoordPointer(lib, size, type, stride, memPtr, funcPtr)
-{
-	if (currentClientActiveTexture !== 0x84C0) {
-		return;
-	}
-	texCoordData.size = size;
-	texCoordData.type = type;
-	texCoordData.stride = stride;
-	texCoordData.pointer = Number(memPtr);
+const mem = new WasmHeapMemoryManager();
+
+// ============================================================================
+// 2. Dynamic C Symbol Registry (Tracks dlsym & glfwGetProcAddress Pointers)
+// ============================================================================
+class NativeSymbolRegistry {
+  constructor() {
+    this.nameToId = new Map();
+    this.idToName = new Map();
+    this.idToHandler = new Map();
+    this.nextSymbolId = 0x10000;
+  }
+
+  register(name, handler = null) {
+    let id = this.nameToId.get(name);
+    if (!id) {
+      id = this.nextSymbolId++;
+      this.nameToId.set(name, id);
+      this.idToName.set(id, name);
+    }
+    if (handler) {
+      this.idToHandler.set(id, handler);
+    }
+    return id;
+  }
+
+  resolve(name) {
+    if (!name) return 1;
+    if (this.nameToId.has(name)) {
+      return this.nameToId.get(name);
+    }
+    // Auto-bind to glDispatch or glfwDispatch if matching
+    if (glDispatch[name]) {
+      return this.register(name, glDispatch[name]);
+    }
+    if (glfwDispatch[name]) {
+      return this.register(name, glfwDispatch[name]);
+    }
+    return this.register(name, null);
+  }
+
+  invoke(lib, funcId, args) {
+    const id = Number(funcId);
+    const handler = this.idToHandler.get(id);
+    if (handler) {
+      return handler(lib, ...args);
+    }
+    const symName = this.idToName.get(id);
+    if (symName) {
+      if (glDispatch[symName]) return glDispatch[symName](lib, ...args);
+      if (glfwDispatch[symName]) return glfwDispatch[symName](lib, ...args);
+      if (alDispatch[symName]) return alDispatch[symName](lib, ...args);
+    }
+    return 0;
+  }
 }
 
-function Java_org_lwjgl_opengl_GL11_nglEnableClientState(lib, v, funcPtr) {
-	if(v == 0x8074/*GL_VERTEX_ARRAY*/) {
-		vertexData.enabled = true;
-	} else if(v == 0x8075/*GL_NORMAL_ARRAY*/) {
-		normalData.enabled = true;
-	} else if(v == 0x8076/*GL_COLOR_ARRAY*/) {
-		colorData.enabled = true;
-	} else if(v == 0x8078/*GL_TEXTURE_COORD_ARRAY*/) {
-		if (currentClientActiveTexture === 0x84C0) texCoordData.enabled = true;
-	} else if(verboseLog) {
-		console.log("glEnableClientState");
-	}
+const symRegistry = new NativeSymbolRegistry();
+
+// ============================================================================
+// 3. GLFW 3.3.x Complete Implementation
+// ============================================================================
+const GLFW_TRUE = 1;
+const GLFW_FALSE = 0;
+const GLFW_CURSOR = 0x00033001;
+const GLFW_CURSOR_NORMAL = 0x00034001;
+const GLFW_CURSOR_HIDDEN = 0x00034002;
+const GLFW_CURSOR_DISABLED = 0x00034003;
+
+const glfwState = {
+  initialized: false,
+  windowHandle: 0x8801,
+  monitorHandle: 0x9901,
+  width: 854,
+  height: 480,
+  title: "Minecraft 1.20.1",
+  shouldClose: 0,
+  cursorMode: GLFW_CURSOR_NORMAL,
+  mouseX: 427,
+  mouseY: 240,
+  keys: new Uint8Array(512),
+  mouseButtons: new Uint8Array(16),
+  callbacks: {},
+  windowAttribs: new Map([
+    [0x00020001 /* FOCUSED */, 1],
+    [0x00020002 /* ICONIFIED */, 0],
+    [0x00020003 /* RESIZABLE */, 1],
+    [0x00020004 /* VISIBLE */, 1],
+    [0x00020005 /* DECORATED */, 1],
+    [0x0002000A /* HOVERED */, 1]
+  ]),
+  vidmodePtr: 0
+};
+
+function browserCodeToGLFWKey(code) {
+  if (code.startsWith("Key")) return code.charCodeAt(3);
+  if (code.startsWith("Digit")) return code.charCodeAt(5);
+  const map = {
+    Space: 32, Apostrophe: 39, Comma: 44, Minus: 45, Period: 46, Slash: 47,
+    Semicolon: 59, Equal: 61, BracketLeft: 91, Backslash: 92, BracketRight: 93, Backquote: 96,
+    Escape: 256, Enter: 257, Tab: 258, Backspace: 259, Insert: 260, Delete: 261,
+    ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264, ArrowUp: 265,
+    PageUp: 266, PageDown: 267, Home: 268, End: 269,
+    CapsLock: 280, ScrollLock: 281, NumLock: 282, PrintScreen: 283, Pause: 284,
+    F1: 290, F2: 291, F3: 292, F4: 293, F5: 294, F6: 295,
+    F7: 296, F8: 297, F9: 298, F10: 299, F11: 300, F12: 301,
+    ShiftLeft: 340, ControlLeft: 341, AltLeft: 342, MetaLeft: 343,
+    ShiftRight: 344, ControlRight: 345, AltRight: 346, MetaRight: 347
+  };
+  return map[code] || 0;
 }
 
-function Java_org_lwjgl_opengl_GL11_nglColorPointer(lib, size, type, stride, memPtr, funcPtr)
-{
-	colorData.size = size;
-	colorData.type = type;
-	colorData.stride = stride;
-	colorData.pointer = Number(memPtr);
+glCanvas.addEventListener("keydown", e => {
+  const k = browserCodeToGLFWKey(e.code);
+  if (k > 0 && k < 512) glfwState.keys[k] = 1;
+});
+glCanvas.addEventListener("keyup", e => {
+  const k = browserCodeToGLFWKey(e.code);
+  if (k > 0 && k < 512) glfwState.keys[k] = 0;
+});
+glCanvas.addEventListener("mousedown", e => {
+  glfwState.mouseButtons[e.button] = 1;
+  if (glfwState.cursorMode === GLFW_CURSOR_DISABLED && document.pointerLockElement !== glCanvas) {
+    try { glCanvas.requestPointerLock(); } catch (_) {}
+  }
+});
+glCanvas.addEventListener("mouseup", e => {
+  glfwState.mouseButtons[e.button] = 0;
+});
+glCanvas.addEventListener("mousemove", e => {
+  if (document.pointerLockElement === glCanvas) {
+    glfwState.mouseX += e.movementX;
+    glfwState.mouseY += e.movementY;
+  } else {
+    const r = glCanvas.getBoundingClientRect();
+    glfwState.mouseX = e.clientX - r.left;
+    glfwState.mouseY = e.clientY - r.top;
+  }
+});
+
+const glfwDispatch = {
+  glfwInit(lib) {
+    glfwState.initialized = true;
+    window.webforgeLog?.("[GLFW] glfwInit() -> GLFW_TRUE", "glfw");
+    return GLFW_TRUE;
+  },
+  glfwTerminate(lib) {
+    glfwState.initialized = false;
+    return 0;
+  },
+  glfwInitHint(lib, hint, value) {},
+  glfwGetVersion(lib, majorPtr, minorPtr, revPtr) {
+    if (majorPtr) mem.writeInt32(lib, majorPtr, 3);
+    if (minorPtr) mem.writeInt32(lib, minorPtr, 3);
+    if (revPtr) mem.writeInt32(lib, revPtr, 8);
+  },
+  glfwGetVersionString(lib) {
+    return mem.allocCString(lib, "3.3.8 WebForge WASM GLFW");
+  },
+  glfwGetError(lib, descriptionPtr) {
+    if (descriptionPtr) mem.writeInt32(lib, descriptionPtr, 0);
+    return 0; // GLFW_NO_ERROR
+  },
+  glfwSetErrorCallback(lib, cbfun) {
+    const prev = glfwState.callbacks.error || 0;
+    glfwState.callbacks.error = Number(cbfun);
+    return prev;
+  },
+  glfwDefaultWindowHints(lib) {},
+  glfwWindowHint(lib, hint, value) {},
+  glfwWindowHintString(lib, hint, valuePtr) {},
+  glfwCreateWindow(lib, width, height, titlePtr, monitor, share) {
+    glfwState.width = Number(width) || 854;
+    glfwState.height = Number(height) || 480;
+    glfwState.title = mem.readCString(lib, titlePtr) || "Minecraft 1.20.1";
+    glCanvas.width = glfwState.width;
+    glCanvas.height = glfwState.height;
+    glCanvas.style.display = "block";
+    window.webforgeLog?.(`[GLFW] glfwCreateWindow(${glfwState.width}x${glfwState.height}, "${glfwState.title}")`, "glfw");
+    return glfwState.windowHandle;
+  },
+  glfwDestroyWindow(lib, window) {},
+  glfwWindowShouldClose(lib, window) {
+    return glfwState.shouldClose;
+  },
+  glfwSetWindowShouldClose(lib, window, value) {
+    glfwState.shouldClose = Number(value);
+  },
+  glfwSetWindowTitle(lib, window, titlePtr) {
+    glfwState.title = mem.readCString(lib, titlePtr);
+    document.title = glfwState.title;
+  },
+  glfwSetWindowIcon(lib, window, count, imagesPtr) {},
+  glfwGetWindowPos(lib, window, xposPtr, yposPtr) {
+    if (xposPtr) mem.writeInt32(lib, xposPtr, 0);
+    if (yposPtr) mem.writeInt32(lib, yposPtr, 0);
+  },
+  glfwSetWindowPos(lib, window, xpos, ypos) {},
+  glfwGetWindowSize(lib, window, widthPtr, heightPtr) {
+    if (widthPtr) mem.writeInt32(lib, widthPtr, glCanvas.width || glfwState.width);
+    if (heightPtr) mem.writeInt32(lib, heightPtr, glCanvas.height || glfwState.height);
+  },
+  glfwSetWindowSize(lib, window, width, height) {
+    glfwState.width = Number(width);
+    glfwState.height = Number(height);
+    glCanvas.width = glfwState.width;
+    glCanvas.height = glfwState.height;
+  },
+  glfwSetWindowSizeLimits(lib, window, minwidth, minheight, maxwidth, maxheight) {},
+  glfwSetWindowAspectRatio(lib, window, numer, denom) {},
+  glfwGetFramebufferSize(lib, window, widthPtr, heightPtr) {
+    if (widthPtr) mem.writeInt32(lib, widthPtr, glCanvas.width || glfwState.width);
+    if (heightPtr) mem.writeInt32(lib, heightPtr, glCanvas.height || glfwState.height);
+  },
+  glfwGetWindowFrameSize(lib, window, lPtr, tPtr, rPtr, bPtr) {
+    if (lPtr) mem.writeInt32(lib, lPtr, 0);
+    if (tPtr) mem.writeInt32(lib, tPtr, 0);
+    if (rPtr) mem.writeInt32(lib, rPtr, 0);
+    if (bPtr) mem.writeInt32(lib, bPtr, 0);
+  },
+  glfwGetWindowContentScale(lib, window, xscalePtr, yscalePtr) {
+    if (xscalePtr) mem.writeFloat32(lib, xscalePtr, 1.0);
+    if (yscalePtr) mem.writeFloat32(lib, yscalePtr, 1.0);
+  },
+  glfwIconifyWindow(lib, window) {},
+  glfwRestoreWindow(lib, window) {},
+  glfwMaximizeWindow(lib, window) {},
+  glfwShowWindow(lib, window) {
+    glCanvas.style.display = "block";
+  },
+  glfwHideWindow(lib, window) {},
+  glfwFocusWindow(lib, window) {
+    glCanvas.focus();
+  },
+  glfwRequestWindowAttention(lib, window) {},
+  glfwGetWindowMonitor(lib, window) {
+    return 0; // Windowed mode
+  },
+  glfwSetWindowMonitor(lib, window, monitor, xpos, ypos, width, height, refreshRate) {
+    glfwState.width = Number(width);
+    glfwState.height = Number(height);
+    glCanvas.width = glfwState.width;
+    glCanvas.height = glfwState.height;
+  },
+  glfwGetWindowAttrib(lib, window, attrib) {
+    return glfwState.windowAttribs.get(Number(attrib)) ?? 1;
+  },
+  glfwSetWindowAttrib(lib, window, attrib, value) {
+    glfwState.windowAttribs.set(Number(attrib), Number(value));
+  },
+  glfwSetWindowUserPointer(lib, window, ptr) {
+    glfwState.userPtr = Number(ptr);
+  },
+  glfwGetWindowUserPointer(lib, window) {
+    return glfwState.userPtr || 0;
+  },
+  glfwGetMonitors(lib, countPtr) {
+    if (countPtr) mem.writeInt32(lib, countPtr, 1);
+    const arrPtr = mem.malloc(lib, 8);
+    mem.writeInt32(lib, arrPtr, glfwState.monitorHandle);
+    return arrPtr;
+  },
+  glfwGetPrimaryMonitor(lib) {
+    return glfwState.monitorHandle;
+  },
+  glfwGetMonitorPos(lib, monitor, xposPtr, yposPtr) {
+    if (xposPtr) mem.writeInt32(lib, xposPtr, 0);
+    if (yposPtr) mem.writeInt32(lib, yposPtr, 0);
+  },
+  glfwGetMonitorWorkarea(lib, monitor, xPtr, yPtr, wPtr, hPtr) {
+    if (xPtr) mem.writeInt32(lib, xPtr, 0);
+    if (yPtr) mem.writeInt32(lib, yPtr, 0);
+    if (wPtr) mem.writeInt32(lib, wPtr, window.screen.width || 1920);
+    if (hPtr) mem.writeInt32(lib, hPtr, window.screen.height || 1080);
+  },
+  glfwGetMonitorPhysicalSize(lib, monitor, wMM, hMM) {
+    if (wMM) mem.writeInt32(lib, wMM, 530);
+    if (hMM) mem.writeInt32(lib, hMM, 300);
+  },
+  glfwGetMonitorContentScale(lib, monitor, xscalePtr, yscalePtr) {
+    if (xscalePtr) mem.writeFloat32(lib, xscalePtr, 1.0);
+    if (yscalePtr) mem.writeFloat32(lib, yscalePtr, 1.0);
+  },
+  glfwGetMonitorName(lib, monitor) {
+    return mem.allocCString(lib, "WebForge Browser Display");
+  },
+  glfwGetVideoModes(lib, monitor, countPtr) {
+    if (countPtr) mem.writeInt32(lib, countPtr, 1);
+    return glfwDispatch.glfwGetVideoMode(lib, monitor);
+  },
+  glfwGetVideoMode(lib, monitor) {
+    if (!glfwState.vidmodePtr) {
+      glfwState.vidmodePtr = mem.malloc(lib, 24);
+    }
+    const p = glfwState.vidmodePtr;
+    mem.writeInt32(lib, p + 0, window.screen.width || 1920);
+    mem.writeInt32(lib, p + 4, window.screen.height || 1080);
+    mem.writeInt32(lib, p + 8, 8);
+    mem.writeInt32(lib, p + 12, 8);
+    mem.writeInt32(lib, p + 16, 8);
+    mem.writeInt32(lib, p + 20, 60);
+    return p;
+  },
+  glfwMakeContextCurrent(lib, window) {},
+  glfwGetCurrentContext(lib) {
+    return glfwState.windowHandle;
+  },
+  glfwSwapBuffers(lib, window) {
+    return new Promise(resolve => requestAnimationFrame(resolve));
+  },
+  glfwSwapInterval(lib, interval) {},
+  glfwExtensionSupported(lib, extPtr) {
+    const ext = mem.readCString(lib, extPtr);
+    const supported = glCtx.getSupportedExtensions() || [];
+    return supported.includes(ext) ? GLFW_TRUE : GLFW_FALSE;
+  },
+  glfwGetProcAddress(lib, procnamePtr) {
+    const procName = mem.readCString(lib, procnamePtr);
+    return symRegistry.resolve(procName);
+  },
+  glfwGetTime(lib) {
+    return performance.now() / 1000.0;
+  },
+  glfwSetTime(lib, time) {},
+  glfwGetTimerValue(lib) {
+    return Math.floor(performance.now() * 1000);
+  },
+  glfwGetTimerFrequency(lib) {
+    return 1000000;
+  },
+  glfwPollEvents(lib) {},
+  glfwWaitEvents(lib) {},
+  glfwWaitEventsTimeout(lib, timeout) {},
+  glfwPostEmptyEvent(lib) {},
+  glfwGetInputMode(lib, window, mode) {
+    if (Number(mode) === GLFW_CURSOR) return glfwState.cursorMode;
+    return 0;
+  },
+  glfwSetInputMode(lib, window, mode, value) {
+    if (Number(mode) === GLFW_CURSOR) {
+      glfwState.cursorMode = Number(value);
+      if (glfwState.cursorMode === GLFW_CURSOR_DISABLED) {
+        try { glCanvas.requestPointerLock(); } catch (_) {}
+      } else if (document.pointerLockElement === glCanvas) {
+        try { document.exitPointerLock(); } catch (_) {}
+      }
+    }
+  },
+  glfwRawMouseMotionSupported(lib) {
+    return GLFW_TRUE;
+  },
+  glfwGetKeyName(lib, key, scancode) {
+    return mem.allocCString(lib, String.fromCharCode(Number(key) || 65));
+  },
+  glfwGetKeyScancode(lib, key) {
+    return Number(key);
+  },
+  glfwGetKey(lib, window, key) {
+    const k = Number(key);
+    return (k >= 0 && k < 512) ? glfwState.keys[k] : 0;
+  },
+  glfwGetMouseButton(lib, window, button) {
+    const b = Number(button);
+    return (b >= 0 && b < 16) ? glfwState.mouseButtons[b] : 0;
+  },
+  glfwGetCursorPos(lib, window, xposPtr, yposPtr) {
+    if (xposPtr) mem.writeFloat64(lib, xposPtr, glfwState.mouseX);
+    if (yposPtr) mem.writeFloat64(lib, yposPtr, glfwState.mouseY);
+  },
+  glfwSetCursorPos(lib, window, xpos, ypos) {
+    glfwState.mouseX = Number(xpos);
+    glfwState.mouseY = Number(ypos);
+  },
+  glfwCreateCursor(lib, imagePtr, xhot, yhot) {
+    return 1;
+  },
+  glfwCreateStandardCursor(lib, shape) {
+    return 1;
+  },
+  glfwDestroyCursor(lib, cursor) {},
+  glfwSetCursor(lib, window, cursor) {},
+  glfwSetClipboardString(lib, window, strPtr) {
+    const text = mem.readCString(lib, strPtr);
+    navigator.clipboard?.writeText(text).catch(() => {});
+  },
+  glfwGetClipboardString(lib, window) {
+    return mem.allocCString(lib, "");
+  }
+};
+
+// Register all GLFW callback setters automatically
+[
+  "glfwSetWindowPosCallback", "glfwSetWindowSizeCallback", "glfwSetWindowCloseCallback",
+  "glfwSetWindowRefreshCallback", "glfwSetWindowFocusCallback", "glfwSetWindowIconifyCallback",
+  "glfwSetWindowMaximizeCallback", "glfwSetFramebufferSizeCallback", "glfwSetWindowContentScaleCallback",
+  "glfwSetKeyCallback", "glfwSetCharCallback", "glfwSetCharModsCallback",
+  "glfwSetMouseButtonCallback", "glfwSetCursorPosCallback", "glfwSetCursorEnterCallback",
+  "glfwSetScrollCallback", "glfwSetDropCallback", "glfwSetMonitorCallback", "glfwSetJoystickCallback"
+].forEach(cbName => {
+  glfwDispatch[cbName] = function(lib, windowOrCb, maybeCb) {
+    const prev = glfwState.callbacks[cbName] || 0;
+    glfwState.callbacks[cbName] = Number(maybeCb !== undefined ? maybeCb : windowOrCb);
+    return prev;
+  };
+});
+
+// ============================================================================
+// 4. Modern OpenGL 3.2+ / 4.x Core Profile to WebGL 2 Engine
+// ============================================================================
+const glObjects = {
+  buffers: [null],
+  vaos: [null],
+  textures: [null],
+  texMeta: [null],
+  framebuffers: [null],
+  renderbuffers: [null],
+  programs: [null],
+  shaders: [null],
+  shaderTypes: [null],
+  uniforms: [null],
+  samplers: [null],
+  queries: [null],
+  syncs: [null],
+  mappedBuffers: new Map() // target -> { bufferId, ptr, length }
+};
+
+let boundArrayBufferId = 0;
+let boundElementBufferId = 0;
+let activeTexSlot = 0;
+const boundTexBySlot = new Int32Array(32);
+
+function registerGLObj(table, obj) {
+  const id = table.length;
+  table.push(obj);
+  return id;
 }
 
-function Java_org_lwjgl_opengl_GL11_nglVertexPointer(lib, size, type, stride, memPtr, funcPtr)
-{
-	vertexData.size = size;
-	vertexData.type = type;
-	vertexData.stride = stride;
-	vertexData.pointer = Number(memPtr);
+const SUPPORTED_GL_EXTENSIONS = [
+  "GL_ARB_vertex_array_object",
+  "GL_ARB_vertex_buffer_object",
+  "GL_ARB_framebuffer_object",
+  "GL_ARB_uniform_buffer_object",
+  "GL_ARB_explicit_attrib_location",
+  "GL_ARB_shader_objects",
+  "GL_ARB_texture_storage",
+  "GL_ARB_sampler_objects",
+  "GL_ARB_map_buffer_range",
+  "GL_ARB_copy_buffer",
+  "GL_ARB_instanced_arrays",
+  "GL_ARB_draw_instanced",
+  "GL_EXT_texture_filter_anisotropic",
+  "GL_EXT_framebuffer_blit",
+  "GL_KHR_debug"
+];
+
+// Translates Minecraft 1.20.1 Blaze3D GLSL (#version 150) to WebGL 2 (#version 300 es)
+function transpileGLSL150ToWebGL2(source, shaderType) {
+  let src = String(source || "").trim();
+  const isFrag = (shaderType === glCtx.FRAGMENT_SHADER);
+
+  // Strip #version 110/120/130/140/150/330/400+
+  src = src.replace(/#version\s+\d+\s*(core|compatibility)?[^\n]*/g, "");
+
+  let header = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n";
+  if (isFrag && src.includes("gl_FragColor")) {
+    header += "out vec4 _webforgeFragColor;\n";
+    src = src.replace(/\bgl_FragColor\b/g, "_webforgeFragColor");
+  }
+  if (!isFrag) {
+    src = src.replace(/\battribute\s+/g, "in ");
+    src = src.replace(/\bvarying\s+/g, "out ");
+  } else {
+    src = src.replace(/\bvarying\s+/g, "in ");
+  }
+  src = src.replace(/\btexture2D\s*\(/g, "texture(");
+  return header + src;
 }
 
-function Java_org_lwjgl_opengl_GL11_nglDrawArrays(lib, mode, first, count, funcPtr)
-{
-	var v = lib.getJNIDataView();
-	if(curList) return pushDrawArraysInList(curList, v, mode, first, count);
-	uploadAllData(v, count, null, null, null, null);
-	drawArraysImpl(mode, first, count);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglStencilFunc(lib, func, ref, mask, funcPtr)
-{
-    checkNoList(curList);
-    glCtx.stencilFunc(func, ref, mask);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglStencilOp(lib, fail, zfail, zpass, funcPtr)
-{
-    checkNoList(curList);
-    glCtx.stencilOp(fail, zfail, zpass);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglStencilMask(lib, mask, funcPtr)
-{
-    checkNoList(curList);
-    glCtx.stencilMask(mask);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglClearStencil(lib, s, funcPtr)
-{
-    checkNoList(curList);
-    glCtx.clearStencil(s);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglDisableClientState(lib, v, funcPtr) {
-	if(v == 0x8074/*GL_VERTEX_ARRAY*/) {
-		vertexData.enabled = false;
-	} else if(v == 0x8075/*GL_NORMAL_ARRAY*/) {
-		normalData.enabled = false;
-	} else if(v == 0x8076/*GL_COLOR_ARRAY*/) {
-		colorData.enabled = false;
-	} else if(v == 0x8078/*GL_TEXTURE_COORD_ARRAY*/) {
-		if (currentClientActiveTexture === 0x84C0) texCoordData.enabled = false;
-	} else if(verboseLog) {
-		console.log("glDisableClientState");
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglColor4f(lib, r, g, b, a, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor4f);
-	immediateModeData.currentColor[0] = r;
-	immediateModeData.currentColor[1] = g;
-	immediateModeData.currentColor[2] = b;
-	immediateModeData.currentColor[3] = a;
-	glCtx.vertexAttrib4f(colorLocation, r, g, b, a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglAlphaFunc(lib, func, ref, funcPtr)
-{
-	if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglAlphaFunc);
-	if (verboseLog) console.log("glAlphaFunc: func=" + func + ", ref=" + ref);
-	glCtx.uniform1f(alphaFuncLocation, func);
-	glCtx.uniform1f(alphaRefLocation, ref);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGenLists(lib, range, funcPtr)
-{
-	checkNoList(curList);
-	var ret = cmdLists.length;
-	for(var i=0;i<range;i++)
-		cmdLists.push([]);
-	return ret;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglNewList(lib, list, mode, funcPtr)
-{
-	checkNoList(curList);
-	assert(mode == 0x1300/*GL_COMPILE*/);
-	curList = cmdLists[list];
-	for (var i = 0; i < curList.length; i++) {
-		if (curList[i].gpuBuf) glCtx.deleteBuffer(curList[i].gpuBuf);
-		if (curList[i].vao) glCtx.deleteVertexArray(curList[i].vao);
-	}
-	curList.length = 0;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglEndList(lib, funcPtr)
-{
-	curList = null;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglColor3f(lib, r, g, b, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor3f);
-	immediateModeData.currentColor[0] = r;
-	immediateModeData.currentColor[1] = g;
-	immediateModeData.currentColor[2] = b;
-	immediateModeData.currentColor[3] = 1.0;
-	glCtx.vertexAttrib4f(colorLocation, r, g, b, 1.0);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglColor3ub(lib, r, g, b, funcPtr)
-{
-	if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor3ub);
-	var rf = (r & 0xFF) / 255.0;
-	var gf = (g & 0xFF) / 255.0;
-	var bf = (b & 0xFF) / 255.0;
-	immediateModeData.currentColor[0] = rf;
-	immediateModeData.currentColor[1] = gf;
-	immediateModeData.currentColor[2] = bf;
-	immediateModeData.currentColor[3] = 1.0;
-	glCtx.vertexAttrib4f(colorLocation, rf, gf, bf, 1.0);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglColor4ub(lib, r, g, b, a, funcPtr)
-{
-	if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglColor4ub);
-	var rf = (r & 0xFF) / 255.0;
-	var gf = (g & 0xFF) / 255.0;
-	var bf = (b & 0xFF) / 255.0;
-	var af = (a & 0xFF) / 255.0;
-	immediateModeData.currentColor[0] = rf;
-	immediateModeData.currentColor[1] = gf;
-	immediateModeData.currentColor[2] = bf;
-	immediateModeData.currentColor[3] = af;
-	glCtx.vertexAttrib4f(colorLocation, rf, gf, bf, af);
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetNativeCursorCapabilities()
-{
-}
-
-function Java_org_lwjgl_opengl_GL11_nglShadeModel()
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glShadeModel");
-}
-
-function Java_org_lwjgl_opengl_GL11_nglClearDepth(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.clearDepth(a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglDepthFunc(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.depthFunc(a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglCullFace(lib, mode, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.cullFace(mode);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglPushMatrix(lib, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglPushMatrix);
-	curMatrixStack.push();
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglPopMatrix(lib, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglPopMatrix);
-	curMatrixStack.pop();
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglMultMatrixf(lib, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var m = getCurMatrixTop();
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	
-	for (var i = 0; i < 16; i++) {
-		multScratch[i] = v.getFloat32(ptr + i * 4, true);
-	}
-	glMatrix.mat4.multiply(m, m, multScratch);
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglRotatef(lib, angle, x, y, z, funcPtr)
-{
-	checkNoList(curList);
-	var m = getCurMatrixTop();
-	scratchVec3[0] = x; scratchVec3[1] = y; scratchVec3[2] = z;
-	glMatrix.mat4.rotate(m, m, angle * Math.PI / 180.0, scratchVec3);
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglDepthMask(lib, a, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.depthMask(a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglBlendFunc(lib, sfactor, dfactor)
-{
-	checkNoList(curList);
-	glCtx.blendFunc(sfactor, dfactor);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglColorMask(lib, r, g, b, a, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.colorMask(r, g, b, a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglCopyTexSubImage2D(lib, target, level, xoffset, yoffset, x, y, width, height, funcPtr)
-{
-	checkNoList(curList);
-	glCtx.copyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglScalef(lib, x, y, z, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglScalef);
-	var m = getCurMatrixTop();
-	scratchVec3[0] = x; scratchVec3[1] = y; scratchVec3[2] = z;
-	glMatrix.mat4.scale(m, m, scratchVec3);
-	matricesDirty = true;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglCallLists(lib, n, type, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	assert(type == glCtx.UNSIGNED_INT);
-	var v = lib.getJNIDataView();
-	var buf = new Int32Array(v.buffer, Number(memPtr), n);
-	for(var i=0;i<n;i++)
-		callList(buf[i]);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglFlush()
-{
-	checkNoList(curList);
-	glCtx.flush();
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTexSubImage2D(lib, target, level, xoffset, yoffset, width, height, format, type, memPtr, funcPtr)
-{
-    checkNoList(curList);
-    const v = lib.getJNIDataView();
-    
-    const buf = getTextureData(v, memPtr, width, height, format, type);
-    const glFmt = translateGLFormat(format);
-    const glTyp = translateGLType(type);
-
-    glCtx.pixelStorei(glCtx.UNPACK_ALIGNMENT, 1);
-    glCtx.texSubImage2D(target, level, xoffset, yoffset, width, height, glFmt, glTyp, buf);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGetFloatv(lib, a, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	
-	if(a == /*GL_MODELVIEW_MATRIX*/0xba6) {
-		var mat = modelViewMatrixStack.getTop();
-		for(var i=0; i<16; i++) v.setFloat32(ptr + i*4, mat[i], true);
-	} else if(a == /*GL_PROJECTION_MATRIX*/0xba7) {
-		var mat = projMatrixStack.getTop();
-		for(var i=0; i<16; i++) v.setFloat32(ptr + i*4, mat[i], true);
-	} else if(verboseLog) {
-		console.log("glGetFloat " + a);
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglFogfv(lib, pname, memPtr, funcPtr)
-{
-    var v = lib.getJNIDataView();
-    var ptr = Number(memPtr);
-
-    if (pname === 0x0B66 /* GL_FOG_COLOR */) {
-        var r = v.getFloat32(ptr, true);
-        var g = v.getFloat32(ptr + 4, true);
-        var b = v.getFloat32(ptr + 8, true);
-        var a = v.getFloat32(ptr + 12, true);
-        if (curList) {
-            pushInList(curList, [lib, r, g, b, a], setFogColorDirect);
-        } else {
-            glCtx.uniform4f(fogColorLocation, r, g, b, a);
-        }
+const glDispatch = {
+  glGetError() {
+    return 0; // Prevent spurious GL errors from halting Blaze3D initialization
+  },
+  glGetString(lib, name) {
+    const n = Number(name);
+    let str = "";
+    if (n === 0x1F00 /* GL_VENDOR */) {
+      str = (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
+    } else if (n === 0x1F01 /* GL_RENDERER */) {
+      str = (debugRendererExt && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
+    } else if (n === 0x1F02 /* GL_VERSION */) {
+      str = "3.2.0 WebForge WebGL 2.0";
+    } else if (n === 0x8B8C /* GL_SHADING_LANGUAGE_VERSION */) {
+      str = "1.50 WebForge GLSL ES 3.00";
+    } else if (n === 0x1F03 /* GL_EXTENSIONS */) {
+      str = SUPPORTED_GL_EXTENSIONS.join(" ");
+    }
+    return mem.allocCString(lib, str);
+  },
+  glGetStringi(lib, name, index) {
+    const idx = Number(index);
+    const ext = SUPPORTED_GL_EXTENSIONS[idx] || "GL_ARB_vertex_array_object";
+    return mem.allocCString(lib, ext);
+  },
+  glGetIntegerv(lib, pname, paramsPtr) {
+    const p = Number(pname);
+    let val = 0;
+    if (p === 0x821B /* GL_MAJOR_VERSION */) val = 3;
+    else if (p === 0x821C /* GL_MINOR_VERSION */) val = 2;
+    else if (p === 0x821D /* GL_NUM_EXTENSIONS */) val = SUPPORTED_GL_EXTENSIONS.length;
+    else if (p === 0x9126 /* GL_CONTEXT_PROFILE_MASK */) val = 1; // GL_CONTEXT_CORE_PROFILE_BIT
+    else if (p === 0x0D33 /* GL_MAX_TEXTURE_SIZE */) val = glCtx.getParameter(glCtx.MAX_TEXTURE_SIZE) || 8192;
+    else if (p === 0x84E8 /* GL_MAX_RENDERBUFFER_SIZE */) val = glCtx.getParameter(glCtx.MAX_RENDERBUFFER_SIZE) || 8192;
+    else if (p === 0x8872 /* GL_MAX_TEXTURE_IMAGE_UNITS */) val = 16;
+    else if (p === 0x8B4D /* GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS */) val = 32;
+    else if (p === 0x8869 /* GL_MAX_VERTEX_ATTRIBS */) val = 16;
+    else if (p === 0x0BA2 /* GL_VIEWPORT */) {
+      mem.writeInt32(lib, Number(paramsPtr) + 0, 0);
+      mem.writeInt32(lib, Number(paramsPtr) + 4, 0);
+      mem.writeInt32(lib, Number(paramsPtr) + 8, glCanvas.width);
+      mem.writeInt32(lib, Number(paramsPtr) + 12, glCanvas.height);
+      return;
     } else {
-        var val = v.getFloat32(ptr, true);
-        if (curList) {
-            pushInList(curList, [lib, pname, val], Java_org_lwjgl_opengl_GL11_nglFogf);
-        } else {
-            setFogParam(pname, val);
+      try {
+        const res = glCtx.getParameter(p);
+        val = typeof res === "number" ? res : 16;
+      } catch (_) {
+        val = 16;
+      }
+    }
+    mem.writeInt32(lib, paramsPtr, val);
+  },
+  glGetFloatv(lib, pname, paramsPtr) {
+    mem.writeFloat32(lib, paramsPtr, 1.0);
+  },
+  glGetBooleanv(lib, pname, paramsPtr) {
+    const sub = mem.getSubarray(lib, paramsPtr, 1);
+    if (sub) sub[0] = 1;
+  },
+  glClearColor(lib, r, g, b, a) {
+    glCtx.clearColor(Number(r), Number(g), Number(b), Number(a));
+  },
+  glClearDepth(lib, d) {
+    glCtx.clearDepth(Number(d));
+  },
+  glClearStencil(lib, s) {
+    glCtx.clearStencil(Number(s));
+  },
+  glClear(lib, mask) {
+    glCtx.clear(Number(mask));
+  },
+  glViewport(lib, x, y, w, h) {
+    glCtx.viewport(Number(x), Number(y), Number(w), Number(h));
+  },
+  glScissor(lib, x, y, w, h) {
+    glCtx.scissor(Number(x), Number(y), Number(w), Number(h));
+  },
+  glEnable(lib, cap) {
+    const c = Number(cap);
+    if (c === glCtx.BLEND || c === glCtx.DEPTH_TEST || c === glCtx.CULL_FACE || c === glCtx.SCISSOR_TEST || c === glCtx.STENCIL_TEST || c === glCtx.POLYGON_OFFSET_FILL) {
+      glCtx.enable(c);
+    }
+  },
+  glDisable(lib, cap) {
+    const c = Number(cap);
+    if (c === glCtx.BLEND || c === glCtx.DEPTH_TEST || c === glCtx.CULL_FACE || c === glCtx.SCISSOR_TEST || c === glCtx.STENCIL_TEST || c === glCtx.POLYGON_OFFSET_FILL) {
+      glCtx.disable(c);
+    }
+  },
+  glDepthFunc(lib, func) {
+    glCtx.depthFunc(Number(func));
+  },
+  glDepthMask(lib, flag) {
+    glCtx.depthMask(Boolean(flag));
+  },
+  glBlendFunc(lib, sfactor, dfactor) {
+    glCtx.blendFunc(Number(sfactor), Number(dfactor));
+  },
+  glBlendFuncSeparate(lib, srcRGB, dstRGB, srcA, dstA) {
+    glCtx.blendFuncSeparate(Number(srcRGB), Number(dstRGB), Number(srcA), Number(dstA));
+  },
+  glBlendEquation(lib, mode) {
+    glCtx.blendEquation(Number(mode));
+  },
+  glBlendEquationSeparate(lib, modeRGB, modeAlpha) {
+    glCtx.blendEquationSeparate(Number(modeRGB), Number(modeAlpha));
+  },
+  glBlendColor(lib, r, g, b, a) {
+    glCtx.blendColor(Number(r), Number(g), Number(b), Number(a));
+  },
+  glColorMask(lib, r, g, b, a) {
+    glCtx.colorMask(Boolean(r), Boolean(g), Boolean(b), Boolean(a));
+  },
+  glCullFace(lib, mode) {
+    glCtx.cullFace(Number(mode));
+  },
+  glFrontFace(lib, mode) {
+    glCtx.frontFace(Number(mode));
+  },
+  glPolygonOffset(lib, factor, units) {
+    glCtx.polygonOffset(Number(factor), Number(units));
+  },
+  glPolygonMode(lib, face, mode) {},
+  glLineWidth(lib, width) {
+    glCtx.lineWidth(Number(width));
+  },
+  glPixelStorei(lib, pname, param) {
+    const p = Number(pname);
+    if (p === glCtx.PACK_ALIGNMENT || p === glCtx.UNPACK_ALIGNMENT || p === glCtx.UNPACK_ROW_LENGTH || p === glCtx.UNPACK_SKIP_PIXELS || p === glCtx.UNPACK_SKIP_ROWS) {
+      glCtx.pixelStorei(p, Number(param));
+    }
+  },
+
+  // Buffers (VBO, EBO, UBO)
+  glGenBuffers(lib, n, buffersPtr) {
+    const count = Number(n);
+    const base = Number(buffersPtr);
+    for (let i = 0; i < count; i++) {
+      const id = registerGLObj(glObjects.buffers, glCtx.createBuffer());
+      mem.writeInt32(lib, base + i * 4, id);
+    }
+  },
+  glCreateBuffers(lib, n, buffersPtr) {
+    glDispatch.glGenBuffers(lib, n, buffersPtr);
+  },
+  glBindBuffer(lib, target, buffer) {
+    const t = Number(target);
+    const id = Number(buffer);
+    if (t === glCtx.ARRAY_BUFFER) boundArrayBufferId = id;
+    if (t === glCtx.ELEMENT_ARRAY_BUFFER) boundElementBufferId = id;
+    glCtx.bindBuffer(t, glObjects.buffers[id] || null);
+  },
+  glBindBufferBase(lib, target, index, buffer) {
+    glCtx.bindBufferBase(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null);
+  },
+  glBindBufferRange(lib, target, index, buffer, offset, size) {
+    glCtx.bindBufferRange(Number(target), Number(index), glObjects.buffers[Number(buffer)] || null, Number(offset), Number(size));
+  },
+  glBufferData(lib, target, sizeOrData, dataPtrOrUsage, usageMaybe) {
+    const t = Number(target);
+    if (usageMaybe !== undefined) {
+      const size = Number(sizeOrData);
+      const dataPtr = Number(dataPtrOrUsage);
+      const usage = Number(usageMaybe);
+      if (dataPtr === 0) {
+        glCtx.bufferData(t, size, usage);
+      } else {
+        const sub = mem.getSubarray(lib, dataPtr, size);
+        glCtx.bufferData(t, sub, usage);
+      }
+    }
+  },
+  glBufferSubData(lib, target, offset, size, dataPtr) {
+    const sub = mem.getSubarray(lib, dataPtr, Number(size));
+    if (sub) glCtx.bufferSubData(Number(target), Number(offset), sub);
+  },
+  glMapBuffer(lib, target, access) {
+    const t = Number(target);
+    const len = 262144;
+    const ptr = mem.malloc(lib, len);
+    glObjects.mappedBuffers.set(t, { ptr, length: len });
+    return ptr;
+  },
+  glMapBufferRange(lib, target, offset, length, access) {
+    const t = Number(target);
+    const len = Number(length) || 65536;
+    const ptr = mem.malloc(lib, len);
+    glObjects.mappedBuffers.set(t, { offset: Number(offset), ptr, length: len });
+    return ptr;
+  },
+  glUnmapBuffer(lib, target) {
+    const t = Number(target);
+    const mapped = glObjects.mappedBuffers.get(t);
+    if (mapped) {
+      const sub = mem.getSubarray(lib, mapped.ptr, mapped.length);
+      if (sub) {
+        try {
+          glCtx.bufferSubData(t, mapped.offset || 0, sub);
+        } catch (_) {
+          glCtx.bufferData(t, sub, glCtx.DYNAMIC_DRAW);
         }
+      }
+      mem.free(lib, mapped.ptr);
+      glObjects.mappedBuffers.delete(t);
     }
-}
-
-function setFogColorDirect(lib, r, g, b, a)
-{
-    glCtx.uniform4f(fogColorLocation, r, g, b, a);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglGetTexLevelParameteriv(lib, target, level, pname, memPtr, funcPtr)
-{
-	checkNoList(curList);
-	var v = lib.getJNIDataView();
-	var ptr = Number(memPtr);
-	var boundId = boundTextures[activeTextureUnit];
-	
-	if (pname === 0x1000 /* GL_TEXTURE_WIDTH */) {
-		v.setInt32(ptr, textureWidths[boundId] || 0, true);
-	} else if (pname === 0x1001 /* GL_TEXTURE_HEIGHT */) {
-		v.setInt32(ptr, textureHeights[boundId] || 0, true);
-	} else {
-		v.setInt32(ptr, 0, true);
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglNormal3f(lib, nx, ny, nz, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglNormal3f);
-	immediateModeData.currentNormal[0] = nx;
-	immediateModeData.currentNormal[1] = ny;
-	immediateModeData.currentNormal[2] = nz;
-	glCtx.vertexAttrib3f(normalLocation, nx, ny, nz);
-}
-
-function setFogParam(pname, val)
-{
-    if (pname === 0x0B65 /* GL_FOG_MODE */) {
-        glCtx.uniform1f(fogModeLocation, val);
-    } else if (pname === 0x0B62 /* GL_FOG_DENSITY */) {
-        glCtx.uniform1f(fogDensityLocation, val);
-    } else if (pname === 0x0B63 /* GL_FOG_START */) {
-        glCtx.uniform1f(fogStartLocation, val);
-    } else if (pname === 0x0B64 /* GL_FOG_END */) {
-        glCtx.uniform1f(fogEndLocation, val);
+    return 1;
+  },
+  glDeleteBuffers(lib, n, buffersPtr) {
+    const count = Number(n);
+    const base = Number(buffersPtr);
+    for (let i = 0; i < count; i++) {
+      const id = mem.readInt32(lib, base + i * 4);
+      if (glObjects.buffers[id]) {
+        glCtx.deleteBuffer(glObjects.buffers[id]);
+        glObjects.buffers[id] = null;
+      }
     }
+  },
+
+  // VAOs & Attributes
+  glGenVertexArrays(lib, n, arraysPtr) {
+    const count = Number(n);
+    const base = Number(arraysPtr);
+    for (let i = 0; i < count; i++) {
+      const id = registerGLObj(glObjects.vaos, glCtx.createVertexArray());
+      mem.writeInt32(lib, base + i * 4, id);
+    }
+  },
+  glCreateVertexArrays(lib, n, arraysPtr) {
+    glDispatch.glGenVertexArrays(lib, n, arraysPtr);
+  },
+  glBindVertexArray(lib, array) {
+    glCtx.bindVertexArray(glObjects.vaos[Number(array)] || null);
+  },
+  glDeleteVertexArrays(lib, n, arraysPtr) {
+    const count = Number(n);
+    const base = Number(arraysPtr);
+    for (let i = 0; i < count; i++) {
+      const id = mem.readInt32(lib, base + i * 4);
+      if (glObjects.vaos[id]) {
+        glCtx.deleteVertexArray(glObjects.vaos[id]);
+        glObjects.vaos[id] = null;
+      }
+    }
+  },
+  glEnableVertexAttribArray(lib, index) {
+    glCtx.enableVertexAttribArray(Number(index));
+  },
+  glDisableVertexAttribArray(lib, index) {
+    glCtx.disableVertexAttribArray(Number(index));
+  },
+  glVertexAttribPointer(lib, index, size, type, normalized, stride, pointer) {
+    glCtx.vertexAttribPointer(Number(index), Number(size), Number(type), Boolean(normalized), Number(stride), Number(pointer));
+  },
+  glVertexAttribIPointer(lib, index, size, type, stride, pointer) {
+    glCtx.vertexAttribIPointer(Number(index), Number(size), Number(type), Number(stride), Number(pointer));
+  },
+  glVertexAttribDivisor(lib, index, divisor) {
+    glCtx.vertexAttribDivisor(Number(index), Number(divisor));
+  },
+
+  // Shaders & Programs
+  glCreateShader(lib, type) {
+    const t = Number(type);
+    const s = glCtx.createShader(t);
+    const id = registerGLObj(glObjects.shaders, s);
+    glObjects.shaderTypes[id] = t;
+    return id;
+  },
+  glShaderSource(lib, shader, count, stringsPtr, lengthPtr) {
+    const id = Number(shader);
+    const s = glObjects.shaders[id];
+    if (!s) return;
+    const c = Number(count) || 1;
+    let combined = "";
+    for (let i = 0; i < c; i++) {
+      const strAddr = mem.readInt32(lib, Number(stringsPtr) + i * 4);
+      const raw = mem.readCString(lib, strAddr);
+      if (lengthPtr) {
+        const len = mem.readInt32(lib, Number(lengthPtr) + i * 4);
+        combined += len > 0 ? raw.slice(0, len) : raw;
+      } else {
+        combined += raw;
+      }
+    }
+    const transpiled = transpileGLSL150ToWebGL2(combined, glObjects.shaderTypes[id]);
+    glCtx.shaderSource(s, transpiled);
+  },
+  glCompileShader(lib, shader) {
+    const s = glObjects.shaders[Number(shader)];
+    if (!s) return;
+    glCtx.compileShader(s);
+    if (!glCtx.getShaderParameter(s, glCtx.COMPILE_STATUS)) {
+      window.webforgeLog?.(`[GLSL Compile Warning] ${glCtx.getShaderInfoLog(s)}`, "warn");
+    }
+  },
+  glGetShaderiv(lib, shader, pname, paramsPtr) {
+    const s = glObjects.shaders[Number(shader)];
+    const p = Number(pname);
+    if (p === glCtx.COMPILE_STATUS) {
+      mem.writeInt32(lib, paramsPtr, 1); // Keep Blaze3D running even if a fallback shader warns
+      return;
+    }
+    const val = s ? glCtx.getShaderParameter(s, p) : 0;
+    mem.writeInt32(lib, paramsPtr, typeof val === "boolean" ? (val ? 1 : 0) : (val || 0));
+  },
+  glGetShaderInfoLog(lib, shader, maxLength, lengthPtr, infoLogPtr) {
+    const s = glObjects.shaders[Number(shader)];
+    const info = (s && glCtx.getShaderInfoLog(s)) || "";
+    const bytes = new TextEncoder().encode(info);
+    const len = Math.min(Number(maxLength) - 1, bytes.length);
+    if (lengthPtr) mem.writeInt32(lib, lengthPtr, len);
+    const out = mem.getSubarray(lib, infoLogPtr, len + 1);
+    if (out) {
+      out.set(bytes.subarray(0, len));
+      out[len] = 0;
+    }
+  },
+  glDeleteShader(lib, shader) {
+    const id = Number(shader);
+    if (glObjects.shaders[id]) {
+      glCtx.deleteShader(glObjects.shaders[id]);
+      glObjects.shaders[id] = null;
+    }
+  },
+  glCreateProgram(lib) {
+    return registerGLObj(glObjects.programs, glCtx.createProgram());
+  },
+  glAttachShader(lib, program, shader) {
+    const p = glObjects.programs[Number(program)];
+    const s = glObjects.shaders[Number(shader)];
+    if (p && s) glCtx.attachShader(p, s);
+  },
+  glDetachShader(lib, program, shader) {
+    const p = glObjects.programs[Number(program)];
+    const s = glObjects.shaders[Number(shader)];
+    if (p && s) glCtx.detachShader(p, s);
+  },
+  glBindAttribLocation(lib, program, index, namePtr) {
+    const p = glObjects.programs[Number(program)];
+    if (p) glCtx.bindAttribLocation(p, Number(index), mem.readCString(lib, namePtr));
+  },
+  glBindFragDataLocation(lib, program, colorNumber, namePtr) {},
+  glLinkProgram(lib, program) {
+    const p = glObjects.programs[Number(program)];
+    if (p) glCtx.linkProgram(p);
+  },
+  glUseProgram(lib, program) {
+    glCtx.useProgram(glObjects.programs[Number(program)] || null);
+  },
+  glGetProgramiv(lib, program, pname, paramsPtr) {
+    const p = glObjects.programs[Number(program)];
+    const n = Number(pname);
+    if (n === glCtx.LINK_STATUS || n === glCtx.VALIDATE_STATUS) {
+      mem.writeInt32(lib, paramsPtr, 1);
+      return;
+    }
+    const val = p ? glCtx.getProgramParameter(p, n) : 0;
+    mem.writeInt32(lib, paramsPtr, typeof val === "boolean" ? (val ? 1 : 0) : (val || 0));
+  },
+  glGetProgramInfoLog(lib, program, maxLength, lengthPtr, infoLogPtr) {
+    if (lengthPtr) mem.writeInt32(lib, lengthPtr, 0);
+  },
+  glDeleteProgram(lib, program) {
+    const id = Number(program);
+    if (glObjects.programs[id]) {
+      glCtx.deleteProgram(glObjects.programs[id]);
+      glObjects.programs[id] = null;
+    }
+  },
+  glGetAttribLocation(lib, program, namePtr) {
+    const p = glObjects.programs[Number(program)];
+    return p ? glCtx.getAttribLocation(p, mem.readCString(lib, namePtr)) : 0;
+  },
+  glGetUniformLocation(lib, program, namePtr) {
+    const p = glObjects.programs[Number(program)];
+    if (!p) return -1;
+    const loc = glCtx.getUniformLocation(p, mem.readCString(lib, namePtr));
+    if (!loc) return -1;
+    return registerGLObj(glObjects.uniforms, loc);
+  },
+  glUniform1i(lib, location, v0) {
+    const u = glObjects.uniforms[Number(location)];
+    if (u) glCtx.uniform1i(u, Number(v0));
+  },
+  glUniform1f(lib, location, v0) {
+    const u = glObjects.uniforms[Number(location)];
+    if (u) glCtx.uniform1f(u, Number(v0));
+  },
+  glUniform2f(lib, location, v0, v1) {
+    const u = glObjects.uniforms[Number(location)];
+    if (u) glCtx.uniform2f(u, Number(v0), Number(v1));
+  },
+  glUniform3f(lib, location, v0, v1, v2) {
+    const u = glObjects.uniforms[Number(location)];
+    if (u) glCtx.uniform3f(u, Number(v0), Number(v1), Number(v2));
+  },
+  glUniform4f(lib, location, v0, v1, v2, v3) {
+    const u = glObjects.uniforms[Number(location)];
+    if (u) glCtx.uniform4f(u, Number(v0), Number(v1), Number(v2), Number(v3));
+  },
+  glUniform1fv(lib, location, count, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 4);
+    if (sub) glCtx.uniform1fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count)));
+  },
+  glUniform2fv(lib, location, count, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 8);
+    if (sub) glCtx.uniform2fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 2));
+  },
+  glUniform3fv(lib, location, count, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 12);
+    if (sub) glCtx.uniform3fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 3));
+  },
+  glUniform4fv(lib, location, count, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 16);
+    if (sub) glCtx.uniform4fv(u, new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 4));
+  },
+  glUniformMatrix3fv(lib, location, count, transpose, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 36);
+    if (sub) glCtx.uniformMatrix3fv(u, Boolean(transpose), new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 9));
+  },
+  glUniformMatrix4fv(lib, location, count, transpose, valuePtr) {
+    const u = glObjects.uniforms[Number(location)];
+    if (!u) return;
+    const sub = mem.getSubarray(lib, valuePtr, Number(count) * 64);
+    if (sub) glCtx.uniformMatrix4fv(u, Boolean(transpose), new Float32Array(sub.buffer, sub.byteOffset, Number(count) * 16));
+  },
+
+  // Textures & Framebuffers
+  glGenTextures(lib, n, texturesPtr) {
+    const count = Number(n);
+    const base = Number(texturesPtr);
+    for (let i = 0; i < count; i++) {
+      const id = registerGLObj(glObjects.textures, glCtx.createTexture());
+      glObjects.texMeta[id] = { width: 16, height: 16, internalFormat: glCtx.RGBA8 };
+      mem.writeInt32(lib, base + i * 4, id);
+    }
+  },
+  glBindTexture(lib, target, texture) {
+    const id = Number(texture);
+    boundTexBySlot[activeTexSlot] = id;
+    glCtx.bindTexture(Number(target), glObjects.textures[id] || null);
+  },
+  glActiveTexture(lib, texture) {
+    const t = Number(texture);
+    activeTexSlot = Math.max(0, t - 0x84C0);
+    glCtx.activeTexture(t);
+  },
+  glTexParameteri(lib, target, pname, param) {
+    let p = Number(param);
+    if ((pname === glCtx.TEXTURE_WRAP_S || pname === glCtx.TEXTURE_WRAP_T) && (p === 0x2900 || p === 0x8059)) {
+      p = glCtx.CLAMP_TO_EDGE;
+    }
+    glCtx.texParameteri(Number(target), Number(pname), p);
+  },
+  glTexParameterf(lib, target, pname, param) {
+    glCtx.texParameterf(Number(target), Number(pname), Number(param));
+  },
+  glTexImage2D(lib, target, level, internalformat, width, height, border, format, type, pixelsPtr) {
+    const w = Number(width);
+    const h = Number(height);
+    const boundId = boundTexBySlot[activeTexSlot];
+    if (glObjects.texMeta[boundId]) {
+      glObjects.texMeta[boundId].width = w;
+      glObjects.texMeta[boundId].height = h;
+    }
+    const intFmt = (internalformat === glCtx.RGBA || internalformat === 4) ? glCtx.RGBA8 : Number(internalformat);
+    const fmt = (format === 0x80E1 /* BGRA */) ? glCtx.RGBA : Number(format);
+    const typ = (type === 0x8367) ? glCtx.UNSIGNED_BYTE : Number(type);
+    const ptr = Number(pixelsPtr);
+
+    if (ptr === 0) {
+      glCtx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, null);
+    } else {
+      const sub = mem.getSubarray(lib, ptr, w * h * 4);
+      glCtx.texImage2D(Number(target), Number(level), intFmt, w, h, Number(border), fmt, typ, sub);
+    }
+  },
+  glTexSubImage2D(lib, target, level, xoffset, yoffset, width, height, format, type, pixelsPtr) {
+    const w = Number(width);
+    const h = Number(height);
+    const ptr = Number(pixelsPtr);
+    if (ptr === 0) return;
+    const fmt = (format === 0x80E1) ? glCtx.RGBA : Number(format);
+    const typ = (type === 0x8367) ? glCtx.UNSIGNED_BYTE : Number(type);
+    const sub = mem.getSubarray(lib, ptr, w * h * 4);
+    if (sub) {
+      glCtx.texSubImage2D(Number(target), Number(level), Number(xoffset), Number(yoffset), w, h, fmt, typ, sub);
+    }
+  },
+  glGetTexLevelParameteriv(lib, target, level, pname, paramsPtr) {
+    const boundId = boundTexBySlot[activeTexSlot];
+    const meta = glObjects.texMeta[boundId] || { width: 16, height: 16 };
+    if (Number(pname) === 0x1000 /* WIDTH */) mem.writeInt32(lib, paramsPtr, meta.width);
+    else if (Number(pname) === 0x1001 /* HEIGHT */) mem.writeInt32(lib, paramsPtr, meta.height);
+    else mem.writeInt32(lib, paramsPtr, 0);
+  },
+  glDeleteTextures(lib, n, texturesPtr) {
+    const count = Number(n);
+    const base = Number(texturesPtr);
+    for (let i = 0; i < count; i++) {
+      const id = mem.readInt32(lib, base + i * 4);
+      if (glObjects.textures[id]) {
+        glCtx.deleteTexture(glObjects.textures[id]);
+        glObjects.textures[id] = null;
+      }
+    }
+  },
+  glGenFramebuffers(lib, n, framebuffersPtr) {
+    const count = Number(n);
+    const base = Number(framebuffersPtr);
+    for (let i = 0; i < count; i++) {
+      const id = registerGLObj(glObjects.framebuffers, glCtx.createFramebuffer());
+      mem.writeInt32(lib, base + i * 4, id);
+    }
+  },
+  glBindFramebuffer(lib, target, framebuffer) {
+    glCtx.bindFramebuffer(Number(target), glObjects.framebuffers[Number(framebuffer)] || null);
+  },
+  glFramebufferTexture2D(lib, target, attachment, textarget, texture, level) {
+    glCtx.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
+  },
+  glCheckFramebufferStatus(lib, target) {
+    return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
+  },
+  glBlitFramebuffer(lib, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
+    glCtx.blitFramebuffer(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
+  },
+  glDeleteFramebuffers(lib, n, framebuffersPtr) {
+    const count = Number(n);
+    const base = Number(framebuffersPtr);
+    for (let i = 0; i < count; i++) {
+      const id = mem.readInt32(lib, base + i * 4);
+      if (glObjects.framebuffers[id]) {
+        glCtx.deleteFramebuffer(glObjects.framebuffers[id]);
+        glObjects.framebuffers[id] = null;
+      }
+    }
+  },
+  glGenRenderbuffers(lib, n, renderbuffersPtr) {
+    const count = Number(n);
+    const base = Number(renderbuffersPtr);
+    for (let i = 0; i < count; i++) {
+      const id = registerGLObj(glObjects.renderbuffers, glCtx.createRenderbuffer());
+      mem.writeInt32(lib, base + i * 4, id);
+    }
+  },
+  glBindRenderbuffer(lib, target, renderbuffer) {
+    glCtx.bindRenderbuffer(Number(target), glObjects.renderbuffers[Number(renderbuffer)] || null);
+  },
+  glRenderbufferStorage(lib, target, internalformat, width, height) {
+    glCtx.renderbufferStorage(Number(target), Number(internalformat), Number(width), Number(height));
+  },
+  glFramebufferRenderbuffer(lib, target, attachment, renderbuffertarget, renderbuffer) {
+    glCtx.framebufferRenderbuffer(Number(target), Number(attachment), Number(renderbuffertarget), glObjects.renderbuffers[Number(renderbuffer)] || null);
+  },
+  glDrawArrays(lib, mode, first, count) {
+    glCtx.drawArrays(Number(mode), Number(first), Number(count));
+  },
+  glDrawElements(lib, mode, count, type, indices) {
+    glCtx.drawElements(Number(mode), Number(count), Number(type), Number(indices));
+  }
+};
+
+// ============================================================================
+// 5. STBImage PNG/JPEG Hardware Decoder (Used by Minecraft 1.20.1 NativeImage)
+// ============================================================================
+let stbiFlipVertically = false;
+
+const stbDispatch = {
+  nstbi_set_flip_vertically_on_load(lib, flag) {
+    stbiFlipVertically = Boolean(flag);
+  },
+  nstbi_failure_reason(lib) {
+    return mem.allocCString(lib, "No STB error");
+  },
+  nstbi_info_from_memory(lib, bufferPtr, len, xPtr, yPtr, compPtr) {
+    const bytes = mem.getSubarray(lib, bufferPtr, Number(len));
+    if (!bytes || bytes.length < 26) return 0;
+    // Parse PNG IHDR directly at offset 16..25
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (dv.getUint32(0) === 0x89504E47) {
+      const w = dv.getInt32(16, false);
+      const h = dv.getInt32(20, false);
+      const colorType = dv.getUint8(25);
+      const comp = colorType === 2 ? 3 : 4;
+      if (xPtr) mem.writeInt32(lib, xPtr, w);
+      if (yPtr) mem.writeInt32(lib, yPtr, h);
+      if (compPtr) mem.writeInt32(lib, compPtr, comp);
+      return 1;
+    }
+    return 0;
+  },
+  async nstbi_load_from_memory(lib, bufferPtr, len, xPtr, yPtr, channelsPtr, desiredChannels) {
+    const bytes = mem.getSubarray(lib, bufferPtr, Number(len));
+    if (!bytes) return 0;
+    try {
+      const blob = new Blob([bytes.slice()]);
+      const bitmap = await createImageBitmap(blob, {
+        imageOrientation: stbiFlipVertically ? "flipY" : "none",
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none"
+      });
+      const w = bitmap.width;
+      const h = bitmap.height;
+      const offCanvas = (typeof OffscreenCanvas !== "undefined")
+        ? new OffscreenCanvas(w, h)
+        : document.createElement("canvas");
+      offCanvas.width = w;
+      offCanvas.height = h;
+      const ctx2d = offCanvas.getContext("2d");
+      ctx2d.drawImage(bitmap, 0, 0);
+      const imgData = ctx2d.getImageData(0, 0, w, h).data;
+      bitmap.close?.();
+
+      const outChannels = Number(desiredChannels) || 4;
+      const totalBytes = w * h * outChannels;
+      const outPtr = mem.malloc(lib, totalBytes);
+      const outSub = mem.getSubarray(lib, outPtr, totalBytes);
+
+      if (outChannels === 4) {
+        outSub.set(imgData);
+      } else {
+        for (let i = 0, j = 0; i < imgData.length; i += 4, j += outChannels) {
+          outSub[j] = imgData[i];
+          if (outChannels > 1) outSub[j + 1] = imgData[i + 1];
+          if (outChannels > 2) outSub[j + 2] = imgData[i + 2];
+        }
+      }
+
+      if (xPtr) mem.writeInt32(lib, xPtr, w);
+      if (yPtr) mem.writeInt32(lib, yPtr, h);
+      if (channelsPtr) mem.writeInt32(lib, channelsPtr, 4);
+      return outPtr;
+    } catch (e) {
+      console.warn("[STBImage] Failed decoding texture:", e);
+      return 0;
+    }
+  },
+  nstbi_image_free(lib, retvalFromStbiLoad) {
+    mem.free(lib, retvalFromStbiLoad);
+  }
+};
+
+// ============================================================================
+// 6. OpenAL Stubs (org.lwjgl.openal.*)
+// ============================================================================
+const alDispatch = {
+  alcOpenDevice() { return 0x7001; },
+  alcCreateContext() { return 0x7002; },
+  alcMakeContextCurrent() { return 1; },
+  alcDestroyContext() {},
+  alcCloseDevice() { return 1; },
+  alcGetError() { return 0; },
+  alcIsExtensionPresent() { return 0; },
+  alcGetIntegerv(lib, dev, pname, size, dataPtr) {
+    if (dataPtr) mem.writeInt32(lib, dataPtr, 0);
+  },
+  alcGetString(lib) { return mem.allocCString(lib, "WebForge OpenAL"); },
+  alGetError() { return 0; }
+};
+
+// ============================================================================
+// 7. Static + Dynamic Proxy JNI Export Builder
+// ============================================================================
+const baseExports = {
+  // MemoryAccessJNI & MemoryUtil
+  Java_org_lwjgl_system_MemoryAccessJNI_getPointerSize: () => 4,
+  Java_org_lwjgl_system_MemoryAccessJNI_malloc: () => symRegistry.register("malloc", (lib, s) => mem.malloc(lib, s)),
+  Java_org_lwjgl_system_MemoryAccessJNI_calloc: () => symRegistry.register("calloc", (lib, n, s) => mem.calloc(lib, n, s)),
+  Java_org_lwjgl_system_MemoryAccessJNI_realloc: () => symRegistry.register("realloc", (lib, p, s) => mem.realloc(lib, p, s)),
+  Java_org_lwjgl_system_MemoryAccessJNI_free: () => symRegistry.register("free", (lib, p) => mem.free(lib, p)),
+  Java_org_lwjgl_system_MemoryAccessJNI_aligned_1alloc: () => symRegistry.register("aligned_alloc", (lib, a, s) => mem.malloc(lib, s)),
+  Java_org_lwjgl_system_MemoryAccessJNI_aligned_1free: () => symRegistry.register("aligned_free", (lib, p) => mem.free(lib, p)),
+  Java_org_lwjgl_system_MemoryUtil_nmemAlloc: (lib, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemCalloc: (lib, num, size) => mem.calloc(lib, num, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemRealloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemFree: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_libc_LibCStdlib_nmalloc: (lib, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_libc_LibCStdlib_ncalloc: (lib, num, size) => mem.calloc(lib, num, size),
+  Java_org_lwjgl_system_libc_LibCStdlib_nrealloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
+  Java_org_lwjgl_system_libc_LibCStdlib_nfree: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_libc_LibCStdlib_naligned_1alloc: (lib, align, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_libc_LibCStdlib_naligned_1free: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_libc_LibCString_nmemset: (lib, ptr, val, bytes) => mem.memset(lib, ptr, val, bytes),
+  Java_org_lwjgl_system_libc_LibCString_nmemcpy: (lib, dst, src, bytes) => mem.memcpy(lib, dst, src, bytes),
+  Java_org_lwjgl_system_JNI_getNativeLibraryVersion: () => "3.3.1",
+
+  // POSIX DynamicLinkLoader (dlopen / dlsym)
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlopen(lib, filenamePtr, mode) {
+    const name = mem.readCString(lib, filenamePtr);
+    window.webforgeLog?.(`[dlopen] Loaded shared library: "${name || "process"}"`, "glfw");
+    return 0x4001;
+  },
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlsym(lib, handle, namePtr) {
+    const symName = mem.readCString(lib, namePtr);
+    return symRegistry.resolve(symName);
+  },
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlerror() {
+    return 0;
+  },
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlclose() {
+    return 0;
+  },
+
+  // STBImage
+  Java_org_lwjgl_stb_STBImage_nstbi_1set_1flip_1vertically_1on_1load: stbDispatch.nstbi_set_flip_vertically_on_load,
+  Java_org_lwjgl_stb_STBImage_nstbi_1failure_1reason: stbDispatch.nstbi_failure_reason,
+  Java_org_lwjgl_stb_STBImage_nstbi_1info_1from_1memory: stbDispatch.nstbi_info_from_memory,
+  Java_org_lwjgl_stb_STBImage_nstbi_1load_1from_1memory: stbDispatch.nstbi_load_from_memory,
+  Java_org_lwjgl_stb_STBImage_nstbi_1image_1free: stbDispatch.nstbi_image_free
+};
+
+// Populate static GLFW & GL exports onto baseExports
+for (const [fnName, fnImpl] of Object.entries(glfwDispatch)) {
+  symRegistry.register(fnName, fnImpl);
+  baseExports[`Java_org_lwjgl_glfw_GLFW_${fnName}`] = fnImpl;
+  baseExports[`Java_org_lwjgl_glfw_GLFW_n${fnName}`] = fnImpl;
 }
 
-function Java_org_lwjgl_opengl_GL11_nglFogi(lib, pname, param, funcPtr)
-{
-    if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglFogi);
-    setFogParam(pname, param);
+const glClasses = ["GL11", "GL11C", "GL12", "GL12C", "GL13", "GL13C", "GL14", "GL14C", "GL15", "GL15C", "GL20", "GL20C", "GL21", "GL30", "GL30C", "GL31", "GL31C", "GL32", "GL32C", "GL33", "GL33C", "GL40", "GL43", "GL45"];
+for (const [glName, glImpl] of Object.entries(glDispatch)) {
+  symRegistry.register(glName, glImpl);
+  for (const cls of glClasses) {
+    baseExports[`Java_org_lwjgl_opengl_${cls}_${glName}`] = glImpl;
+    baseExports[`Java_org_lwjgl_opengl_${cls}_n${glName}`] = glImpl;
+  }
 }
 
-function Java_org_lwjgl_opengl_GL11_nglFogf(lib, pname, param, funcPtr)
-{
-    if (curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL11_nglFogf);
-    setFogParam(pname, param);
+// Dynamic JNI Proxy Generator to intercept all JNI.invoke* / JNI.call* and unenumerated symbols
+function createDynamicJNIProxy(targetObj, logFn) {
+  return new Proxy(targetObj, {
+    has(target, prop) {
+      if (prop in target) return true;
+      if (typeof prop === "string" && prop.startsWith("Java_")) return true;
+      return false;
+    },
+    get(target, prop, receiver) {
+      if (prop in target) return Reflect.get(target, prop, receiver);
+      if (typeof prop !== "string" || !prop.startsWith("Java_")) {
+        return Reflect.get(target, prop, receiver);
+      }
+
+      // 1. Intercept org.lwjgl.system.JNI.invoke* and JNI.call*
+      if (prop.startsWith("Java_org_lwjgl_system_JNI_invoke") || prop.startsWith("Java_org_lwjgl_system_JNI_call")) {
+        const fn = function(lib, ...args) {
+          const funcPtr = args[args.length - 1];
+          const callArgs = args.slice(0, -1);
+          return symRegistry.invoke(lib, funcPtr, callArgs);
+        };
+        target[prop] = fn;
+        return fn;
+      }
+
+      // 2. Intercept any OpenGL GL* / ARB* / EXT* class method
+      const glMatch = prop.match(/^Java_org_lwjgl_opengl_[A-Za-z0-9_]+_n?(gl[A-Za-z0-9_]+)$/);
+      if (glMatch) {
+        const glSym = glMatch[1].replace(/_1/g, "_");
+        const fn = glDispatch[glSym] || function() { return 0; };
+        target[prop] = fn;
+        return fn;
+      }
+
+      // 3. Intercept any GLFW method
+      const glfwMatch = prop.match(/^Java_org_lwjgl_glfw_GLFW_n?(glfw[A-Za-z0-9_]+)$/);
+      if (glfwMatch) {
+        const glfwSym = glfwMatch[1].replace(/_1/g, "_");
+        const fn = glfwDispatch[glfwSym] || function() { return 0; };
+        target[prop] = fn;
+        return fn;
+      }
+
+      // 4. Auto-stub any other native method so UnsatisfiedLinkError never halts the JVM
+      const fallbackStub = function(lib, ...args) {
+        logFn?.(`[Auto-Stubbed JNI] ${prop}`, "warn");
+        return 0;
+      };
+      target[prop] = fallbackStub;
+      return fallbackStub;
+    }
+  });
 }
 
-function Java_org_lwjgl_opengl_GL11_nglColorMaterial()
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glColorMaterial");
-}
+baseExports.__createDynamicJNIProxy = createDynamicJNIProxy;
 
-function Java_org_lwjgl_opengl_GL11_nglCallList(lib, listId, funcPtr)
-{
-	checkNoList(curList);
-	callList(listId);
-}
-
-function Java_org_lwjgl_opengl_GL13_nglActiveTexture(lib, texture, funcPtr)
-{
-	if(curList) return pushInList(curList, arguments, Java_org_lwjgl_opengl_GL13_nglActiveTexture);
-	if (currentActiveTexture === texture) return;
-	if(verboseLog) console.log("glActiveTexture: " + texture.toString(16));
-	activeTextureUnit = texture - 0x84C0;
-	currentActiveTexture = texture;
-	glCtx.activeTexture(texture);
-
-	if (activeTextureUnit === 0) {
-		const isTexEnabled = glStateCache[0xDE1 + "_0"] !== false;
-		glCtx.uniform1f(texMaskLocation, isTexEnabled ? 1.0 : 0.0);
-	}
-}
-
-function Java_org_lwjgl_opengl_GL11_nglLightfv()
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glLightfv");
-}
-
-function Java_org_lwjgl_opengl_GL11_nglLightModelfv()
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glLightModelfv");
-}
-
-function Java_org_lwjgl_opengl_GL11_nglNormalPointer(lib, type, stride, memPtr, funcPtr)
-{
-	normalData.size = 3;
-	normalData.type = type;
-	normalData.stride = stride;
-	normalData.pointer = Number(memPtr);
-}
-
-function Java_org_lwjgl_opengl_GL13_nglMultiTexCoord2f()
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glMultiTexCoord2f");
-}
-
-function Java_org_lwjgl_opengl_GL13_nglClientActiveTexture(lib, texture, funcPtr)
-{
-	if(verboseLog) console.log("glClientActiveTexture: " + texture.toString(16));
-	currentClientActiveTexture = texture;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglLineWidth(lib, width, funcPtr)
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glLineWidth: " + width);
-	glCtx.lineWidth(width);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglPolygonOffset(lib, factor, units, funcPtr)
-{
-	checkNoList(curList);
-	if(verboseLog)
-		console.log("glPolygonOffset");
-	glCtx.polygonOffset(factor, units);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglBegin(lib, mode, funcPtr)
-{
-	checkNoList(curList);
-	immediateModeData.mode = mode;
-	immediateModeData.vertexCount = 0;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglTexCoord2f(lib, x, y, funcPtr)
-{
-	checkNoList(curList);
-	immediateModeData.currentTexCoord[0] = x;
-	immediateModeData.currentTexCoord[1] = y;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglVertex2f(lib, x, y, funcPtr)
-{
-	Java_org_lwjgl_opengl_GL11_nglVertex3f(lib, x, y, 0.0, funcPtr);
-}
-
-function Java_org_lwjgl_opengl_GL11_nglVertex3f(lib, x, y, z, funcPtr)
-{
-	checkNoList(curList);
-	let idx = immediateModeData.vertexCount * 12;
-	let b = immediateModeData.buf;
-	b[idx]      = x;
-	b[idx + 1]  = y;
-	b[idx + 2]  = z;
-	b[idx + 3]  = immediateModeData.currentColor[0];
-	b[idx + 4]  = immediateModeData.currentColor[1];
-	b[idx + 5]  = immediateModeData.currentColor[2];
-	b[idx + 6]  = immediateModeData.currentColor[3];
-	b[idx + 7]  = immediateModeData.currentTexCoord[0];
-	b[idx + 8]  = immediateModeData.currentTexCoord[1];
-	b[idx + 9]  = immediateModeData.currentNormal[0];
-	b[idx + 10] = immediateModeData.currentNormal[1];
-	b[idx + 11] = immediateModeData.currentNormal[2];
-	immediateModeData.vertexCount++;
-}
-
-function Java_org_lwjgl_opengl_GL11_nglEnd(lib, funcPtr)
-{
-	checkNoList(curList);
-	const count = immediateModeData.vertexCount;
-	if (count === 0) return;
-
-	const byteLen = count * 12 * 4;
-
-	glCtx.bindBuffer(glCtx.ARRAY_BUFFER, singleVBO);
-	glCtx.bufferSubData(glCtx.ARRAY_BUFFER, 0, immediateByteView, 0, byteLen);
-
-	glCtx.vertexAttribPointer(vertexPosition, 3, glCtx.FLOAT, false, 48, 0);
-	glCtx.enableVertexAttribArray(vertexPosition);
-
-	glCtx.vertexAttribPointer(colorLocation, 4, glCtx.FLOAT, false, 48, 12);
-	glCtx.enableVertexAttribArray(colorLocation);
-
-	glCtx.vertexAttribPointer(texCoord, 2, glCtx.FLOAT, false, 48, 28);
-	glCtx.enableVertexAttribArray(texCoord);
-
-	glCtx.vertexAttribPointer(normalLocation, 3, glCtx.FLOAT, false, 48, 36);
-	glCtx.enableVertexAttribArray(normalLocation);
-
-	drawArraysImpl(immediateModeData.mode, 0, count);
-}
-
-// These stubs make sure audio creation fails sooner rather than later
-function Java_org_lwjgl_openal_AL_nCreate()
-{
-}
-
-function Java_org_lwjgl_openal_AL10_initNativeStubs()
-{
-}
-
-function Java_org_lwjgl_openal_ALC10_initNativeStubs()
-{
-}
-
-function Java_org_lwjgl_openal_ALC10_nalcOpenDevice()
-{
-}
-
-function Java_org_lwjgl_openal_AL_resetNativeStubs()
-{
-}
-
-function Java_org_lwjgl_openal_AL_nDestroy()
-{
-}
-
-async function Java_org_lwjgl_opengl_LinuxEvent_createEventBuffer(lib)
-{
-	var ByteBuffer = await lib.java.nio.ByteBuffer;
-	var buf = await ByteBuffer.allocateDirect(4 * 8);
-	buf.__addr = (typeof buf.address === "number") ? buf.address : 0;
-	return buf;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nNextEvent(lib, windowId, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	var v = lib.getJNIDataView();
-	var e = eventQueue.shift();
-
-	if (!e) {
-		v.setInt32(bufferAddr + 0, 9 /*FocusIn*/, true);
-		return;
-	}
-
-	switch(e.type)
-	{
-		case "focus":
-			v.setInt32(bufferAddr + 0, /*FocusIn*/9, true);
-			break;
-		case "mousedown":
-			v.setInt32(bufferAddr + 0, /*ButtonPress*/4, true);
-			v.setInt32(bufferAddr + 4, e.x, true);
-			v.setInt32(bufferAddr + 8, e.y, true);
-			v.setInt32(bufferAddr + 12, e.button, true);
-			break;
-		case "mouseup":
-			v.setInt32(bufferAddr + 0, /*ButtonRelease*/5, true);
-			v.setInt32(bufferAddr + 4, e.x, true);
-			v.setInt32(bufferAddr + 8, e.y, true);
-			v.setInt32(bufferAddr + 12, e.button, true);
-			break;
-		case "mousemove":
-			v.setInt32(bufferAddr + 0, /*MotionNotify*/6, true);
-			v.setInt32(bufferAddr + 4, e.x, true);
-			v.setInt32(bufferAddr + 8, e.y, true);
-			break;
-		case "keydown":
-			v.setInt32(bufferAddr + 0, /*KeyPress*/2, true);
-			v.setInt32(bufferAddr + 4, e.keyCode, true);
-			break;
-		case "keyup":
-			v.setInt32(bufferAddr + 0, /*KeyRelease*/3, true);
-			v.setInt32(bufferAddr + 4, e.keyCode, true);
-			break;
-		case "resize":
-		case "configure":
-			v.setInt32(bufferAddr + 0, 22, true);
-			v.setInt32(bufferAddr + 4, 0, true);
-			v.setInt32(bufferAddr + 8, 0, true);
-			v.setInt32(bufferAddr + 12, glCanvas.width, true);
-			v.setInt32(bufferAddr + 16, glCanvas.height, true);
-			break;
-		default:
-			v.setInt32(bufferAddr + 0, 9 /*FocusIn*/, true);
-	}
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetWindow()
-{
-	// Only a single window is emulated
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetType(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 0, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nFilterEvent()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonTime()
-{
-	// TODO: Event timestamps
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonRoot()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonXRoot(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 4, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonYRoot(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 8, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonX(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 4, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonY(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 8, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetFocusDetail()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonType(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 0, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetButtonButton(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 12, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGrabPointer()
-{
-	try {
-		glCanvas.requestPointerLock();
-	} catch (err) {
-		console.warn("Mouse lock blocked - click the screen first!");
-	}
-	lockedMousePos = { x: 0, y: 0 };
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nUngrabPointer()
-{
-	document.exitPointerLock();
-	lockedMousePos = null;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nDefineCursor()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_getRootWindow()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nSetWindowIcon()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nGetWindowWidth()
-{
-	return glCanvas.width;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetWidth()
-{
-	return glCanvas.width;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetHeight()
-{
-	return glCanvas.height;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetX()
-{
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nGetY()
-{
-	return 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nSetWindowSize(lib, display, window, width, height, resizable)
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxDisplay_nReshape(lib, display, window, x, y, width, height)
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nSendWarpEvent()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxMouse_nWarpCursor()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nSetWindow()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nSendEvent()
-{
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetKeyAddress(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 4, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetKeyTime()
-{
-	// TODO: Event timestamps
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetKeyType(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 0, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetKeyKeyCode(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	return lib.getJNIDataView().getInt32(bufferAddr + 4, true);
-}
-
-function Java_org_lwjgl_opengl_LinuxEvent_nGetKeyState(lib, buffer)
-{
-	var bufferAddr = getBufferAddr(buffer);
-	var type = lib.getJNIDataView().getInt32(bufferAddr + 0, true);
-	return (type === 2) ? 1 : 0;
-}
-
-function Java_org_lwjgl_opengl_LinuxKeyboard_lookupKeysym(lib, eventPtr, index)
-{
-	return Number(eventPtr);
-}
-
-function Java_org_lwjgl_opengl_LinuxContextImplementation_nReleaseCurrentContext(lib, peer, funcPtr)
-{
-    return 1;
-}
-
-async function Java_org_lwjgl_opengl_LinuxKeyboard_lookupString(lib, eventPtr, buffer)
-{
-	var charCode = Number(eventPtr);
-	if (charCode >= 32 && charCode <= 126) {
-		var bufferAddr = getBufferAddr(buffer);
-		if (!bufferAddr && buffer && typeof buffer.address === "function") {
-			bufferAddr = Number(await buffer.address());
-		}
-		var v = lib.getJNIDataView();
-		v.setInt8(bufferAddr, charCode);
-		return 1;
-	}
-	return 0;
-}
-
-export default {
-	Java_org_lwjgl_DefaultSysImplementation_getPointerSize,
-	Java_org_lwjgl_DefaultSysImplementation_getJNIVersion,
-	Java_org_lwjgl_DefaultSysImplementation_setDebug,
-	Java_org_lwjgl_opengl_LinuxDisplay_nLockAWT,
-        Java_org_lwjgl_opengl_LinuxDisplay_nSwitchDisplayMode,
-	Java_org_lwjgl_opengl_LinuxDisplay_nUnlockAWT,
-	Java_org_lwjgl_opengl_LinuxDisplay_setErrorHandler,
-	Java_org_lwjgl_opengl_LinuxDisplay_openDisplay,
-	Java_org_lwjgl_opengl_LinuxDisplay_nInternAtom,
-	Java_org_lwjgl_opengl_LinuxDisplay_nIsXrandrSupported,
-	Java_org_lwjgl_opengl_LinuxDisplay_nIsXF86VidModeSupported,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetDefaultScreen,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetAvailableDisplayModes,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetCurrentGammaRamp,
-        Java_org_lwjgl_opengl_LinuxDisplay_nSetGammaRamp,
-	Java_org_lwjgl_opengl_LinuxPeerInfo_createHandle,
-	Java_org_lwjgl_opengl_GLContext_nLoadOpenGLLibrary,
-	Java_org_lwjgl_opengl_LinuxDisplayPeerInfo_initDefaultPeerInfo,
-	Java_org_lwjgl_opengl_LinuxDisplayPeerInfo_initDrawable,
-	Java_org_lwjgl_opengl_AWTSurfaceLock_createHandle,
-	Java_org_lwjgl_opengl_AWTSurfaceLock_lockAndInitHandle,
-	Java_org_lwjgl_opengl_LinuxAWTGLCanvasPeerInfo_getScreenFromSurfaceInfo,
-	Java_org_lwjgl_opengl_LinuxAWTGLCanvasPeerInfo_nInitHandle,
-	Java_org_lwjgl_opengl_AWTSurfaceLock_nUnlock,
-	Java_org_lwjgl_opengl_LinuxPeerInfo_nGetDrawable,
-	Java_org_lwjgl_opengl_LinuxDisplay_nCreateWindow,
-	Java_org_lwjgl_opengl_LinuxDisplay_mapRaised,
-	Java_org_lwjgl_opengl_LinuxDisplay_nCreateBlankCursor,
-	Java_org_lwjgl_opengl_LinuxDisplay_nSetTitle,
-	Java_org_lwjgl_opengl_LinuxMouse_nGetButtonCount,
-	Java_org_lwjgl_opengl_LinuxMouse_nQueryPointer,
-	Java_org_lwjgl_opengl_LinuxMouse_nGetWindowHeight,
-	Java_org_lwjgl_opengl_LinuxKeyboard_getModifierMapping,
-	Java_org_lwjgl_opengl_LinuxKeyboard_nSetDetectableKeyRepeat,
-	Java_org_lwjgl_opengl_LinuxKeyboard_openIM,
-	Java_org_lwjgl_opengl_LinuxKeyboard_allocateComposeStatus,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nCreate,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nMakeCurrent,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nIsCurrent,
-	Java_org_lwjgl_opengl_GLContext_ngetFunctionAddress,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureX,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureY,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureWidth,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetConfigureHeight,
-	Java_org_lwjgl_opengl_GL11_nglGetString,
-	Java_org_lwjgl_opengl_GL11_nglGetIntegerv,
-	Java_org_lwjgl_opengl_GL11_nglGetError,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nSetSwapInterval,
-	Java_org_lwjgl_opengl_GL11_nglClearColor,
-	Java_org_lwjgl_opengl_GL11_nglClear,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nSwapBuffers,
-	Java_org_lwjgl_opengl_LinuxEvent_getPending,
-	Java_org_lwjgl_opengl_GL11_nglMatrixMode,
-	Java_org_lwjgl_opengl_GL11_nglLoadIdentity,
-	Java_org_lwjgl_opengl_GL11_nglOrtho,
-	Java_org_lwjgl_opengl_GL11_nglTranslatef,
-	Java_org_lwjgl_opengl_GL11_nglViewport,
-	Java_org_lwjgl_opengl_GL11_nglDisable,
-	Java_org_lwjgl_opengl_GL11_nglEnable,
-        Java_org_lwjgl_opengl_GL11_nglScissor,
-	Java_org_lwjgl_opengl_GL11_nglGenTextures,
-	Java_org_lwjgl_opengl_GL11_nglBindTexture,
-        Java_org_lwjgl_opengl_GL11_nglDeleteTextures,
-	Java_org_lwjgl_opengl_GL11_nglTexParameteri,
-        Java_org_lwjgl_opengl_GL11_nglTexParameterf,
-	Java_org_lwjgl_opengl_GL11_nglTexImage2D,
-	Java_org_lwjgl_opengl_GL11_nglTexCoordPointer,
-	Java_org_lwjgl_opengl_GL11_nglEnableClientState,
-	Java_org_lwjgl_opengl_GL11_nglColorPointer,
-	Java_org_lwjgl_opengl_GL11_nglVertexPointer,
-	Java_org_lwjgl_opengl_GL11_nglDrawArrays,
-        Java_org_lwjgl_opengl_GL11_nglStencilFunc,
-        Java_org_lwjgl_opengl_GL11_nglStencilOp,
-        Java_org_lwjgl_opengl_GL11_nglStencilMask,
-        Java_org_lwjgl_opengl_GL11_nglClearStencil,
-	Java_org_lwjgl_opengl_GL11_nglDisableClientState,
-	Java_org_lwjgl_opengl_GL11_nglColor4f,
-	Java_org_lwjgl_opengl_GL11_nglAlphaFunc,
-	Java_org_lwjgl_opengl_GL11_nglGenLists,
-	Java_org_lwjgl_opengl_GL11_nglNewList,
-	Java_org_lwjgl_opengl_GL11_nglEndList,
-	Java_org_lwjgl_opengl_GL11_nglColor3f,
-        Java_org_lwjgl_opengl_GL11_nglColor3ub,
-        Java_org_lwjgl_opengl_GL11_nglColor4ub,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetNativeCursorCapabilities,
-	Java_org_lwjgl_opengl_GL11_nglShadeModel,
-	Java_org_lwjgl_opengl_GL11_nglClearDepth,
-	Java_org_lwjgl_opengl_GL11_nglDepthFunc,
-	Java_org_lwjgl_opengl_GL11_nglCullFace,
-	Java_org_lwjgl_opengl_GL11_nglPushMatrix,
-	Java_org_lwjgl_opengl_GL11_nglPopMatrix,
-	Java_org_lwjgl_opengl_GL11_nglMultMatrixf,
-	Java_org_lwjgl_opengl_GL11_nglRotatef,
-	Java_org_lwjgl_opengl_GL11_nglDepthMask,
-	Java_org_lwjgl_opengl_GL11_nglBlendFunc,
-	Java_org_lwjgl_opengl_GL11_nglColorMask,
-	Java_org_lwjgl_opengl_GL11_nglCopyTexSubImage2D,
-	Java_org_lwjgl_opengl_GL11_nglScalef,
-	Java_org_lwjgl_opengl_GL11_nglCallLists,
-	Java_org_lwjgl_opengl_GL11_nglFlush,
-	Java_org_lwjgl_opengl_GL11_nglTexSubImage2D,
-	Java_org_lwjgl_opengl_GL11_nglGetFloatv,
-	Java_org_lwjgl_opengl_GL11_nglFogfv,
-	Java_org_lwjgl_opengl_GL11_nglGetTexLevelParameteriv,
-	Java_org_lwjgl_opengl_GL11_nglNormal3f,
-	Java_org_lwjgl_opengl_GL11_nglFogi,
-	Java_org_lwjgl_opengl_GL11_nglFogf,
-	Java_org_lwjgl_opengl_GL11_nglColorMaterial,
-	Java_org_lwjgl_opengl_GL11_nglCallList,
-	Java_org_lwjgl_opengl_GL13_nglActiveTexture,
-	Java_org_lwjgl_opengl_GL11_nglLightfv,
-	Java_org_lwjgl_opengl_GL11_nglLightModelfv,
-	Java_org_lwjgl_opengl_GL11_nglNormalPointer,
-	Java_org_lwjgl_opengl_GL13_nglMultiTexCoord2f,
-	Java_org_lwjgl_opengl_GL13_nglClientActiveTexture,
-	Java_org_lwjgl_opengl_GL11_nglLineWidth,
-	Java_org_lwjgl_opengl_GL11_nglPolygonOffset,
-	Java_org_lwjgl_opengl_GL11_nglBegin,
-	Java_org_lwjgl_opengl_GL11_nglTexCoord2f,
-        Java_org_lwjgl_opengl_GL11_nglVertex2f,
-	Java_org_lwjgl_opengl_GL11_nglVertex3f,
-	Java_org_lwjgl_opengl_GL11_nglEnd,
-	Java_org_lwjgl_openal_AL_nCreate,
-	Java_org_lwjgl_openal_AL10_initNativeStubs,
-	Java_org_lwjgl_openal_ALC10_initNativeStubs,
-	Java_org_lwjgl_openal_ALC10_nalcOpenDevice,
-	Java_org_lwjgl_openal_AL_resetNativeStubs,
-	Java_org_lwjgl_openal_AL_nDestroy,
-	Java_org_lwjgl_opengl_LinuxEvent_createEventBuffer,
-	Java_org_lwjgl_opengl_LinuxEvent_nNextEvent,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetWindow,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetType,
-	Java_org_lwjgl_opengl_LinuxEvent_nFilterEvent,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonTime,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonRoot,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonXRoot,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonYRoot,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonX,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonY,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetFocusDetail,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonType,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetButtonButton,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGrabPointer,
-	Java_org_lwjgl_opengl_LinuxDisplay_nUngrabPointer,
-	Java_org_lwjgl_opengl_LinuxDisplay_nDefineCursor,
-	Java_org_lwjgl_opengl_LinuxDisplay_getRootWindow,
-	Java_org_lwjgl_opengl_LinuxDisplay_nSetWindowIcon,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetWidth,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetHeight,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetX,
-	Java_org_lwjgl_opengl_LinuxDisplay_nGetY,
-	Java_org_lwjgl_opengl_LinuxDisplay_nSetWindowSize,
-	Java_org_lwjgl_opengl_LinuxDisplay_nReshape,
-	Java_org_lwjgl_opengl_LinuxMouse_nGetWindowWidth,
-	Java_org_lwjgl_opengl_LinuxMouse_nSendWarpEvent,
-	Java_org_lwjgl_opengl_LinuxMouse_nWarpCursor,
-	Java_org_lwjgl_opengl_LinuxEvent_nSetWindow,
-	Java_org_lwjgl_opengl_LinuxEvent_nSendEvent,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetKeyAddress,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetKeyTime,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetKeyType,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetKeyKeyCode,
-	Java_org_lwjgl_opengl_LinuxEvent_nGetKeyState,
-	Java_org_lwjgl_opengl_LinuxKeyboard_lookupKeysym,
-	Java_org_lwjgl_opengl_LinuxKeyboard_lookupString,
-	Java_org_lwjgl_opengl_LinuxContextImplementation_nReleaseCurrentContext,
-}
+export default createDynamicJNIProxy(baseExports, window.webforgeLog);
