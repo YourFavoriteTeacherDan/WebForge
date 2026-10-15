@@ -1,8 +1,6 @@
 // ============================================================================
-// WebForge Explicit LWJGL 3.3.1 Native Table (Zero Proxy Traps)
-// Covers: MemoryAccessJNI, MemoryUtil, ThreadLocalUtil, LibC, JEmalloc,
-// LibFFI, DynamicLinkLoader (dlopen/dlsym), JNI.invoke*/call*, GLFW 3.3.8,
-// OpenGL 1.1 - 4.6 Core Profile, STBImage, and OpenAL 1.1
+// WebForge Explicit LWJGL 3.3.1 Native Table (v4)
+// Direct Wasm Linear Heap + Fallback Off-Heap Allocator
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -158,6 +156,22 @@ class WasmHeapMemoryManager {
     this.jsFallbackBlocks = new Map();
     this.nextFallbackPtr = 0x50000000;
     this.scratchStringPtrs = new Map();
+    this.rawBuffer = null;
+    this.heapView = null;
+  }
+
+  getDataView(lib) {
+    if (lib && typeof lib.getJNIDataView === "function") {
+      try {
+        const v = lib.getJNIDataView();
+        if (v && v.buffer !== this.rawBuffer) {
+          this.rawBuffer = v.buffer;
+          this.heapView = new Uint8Array(v.buffer);
+        }
+        return v;
+      } catch (_) {}
+    }
+    return null;
   }
 
   malloc(lib, size) {
@@ -217,17 +231,24 @@ class WasmHeapMemoryManager {
     if (p === 0) return null;
     const len = Number(byteLength) || this.allocations.get(p) || 256;
 
-    // Locate containing JS block if ptr is an interior pointer
+    // 1. Check JS off-heap blocks (0x50000000+)
     if (this.jsFallbackBlocks.has(p)) {
       const blk = this.jsFallbackBlocks.get(p);
       return blk.subarray(0, Math.min(len, blk.length));
     }
-
-    for (const [basePtr, blk] of this.jsFallbackBlocks.entries()) {
-      if (p >= basePtr && p < basePtr + blk.byteLength) {
-        const offset = p - basePtr;
-        return blk.subarray(offset, Math.min(blk.byteLength, offset + len));
+    if (p >= 0x50000000) {
+      for (const [basePtr, blk] of this.jsFallbackBlocks.entries()) {
+        if (p >= basePtr && p < basePtr + blk.byteLength) {
+          const offset = p - basePtr;
+          return blk.subarray(offset, Math.min(blk.byteLength, offset + len));
+        }
       }
+    }
+
+    // 2. Check CheerpJ Wasm linear memory (for DirectByteBuffer & MemoryStack)
+    this.getDataView(lib);
+    if (this.heapView && p > 0 && p < this.heapView.byteLength) {
+      return this.heapView.subarray(p, Math.min(this.heapView.byteLength, p + len));
     }
 
     const fallback = new Uint8Array(Math.max(len, 256));
@@ -1472,7 +1493,7 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Explicit Plain-Object Export Table (No Proxy)
+// 7. Explicit Plain-Object Export Table
 // ============================================================================
 const jniInvokeHandler = function(lib, ...args) {
   const funcPtr = args[args.length - 1];
@@ -1481,13 +1502,11 @@ const jniInvokeHandler = function(lib, ...args) {
 };
 
 const baseExports = {
-  // ThreadLocalUtil
   Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv: (lib) => mem.calloc(lib, 256, 4),
   Java_org_lwjgl_system_ThreadLocalUtil_getFunctionMissingAbort: () => symRegistry.register("abort", () => 0),
   Java_org_lwjgl_system_ThreadLocalUtil_nsetupEnvData: (lib, count) => mem.calloc(lib, Number(count) || 256, 4),
   Java_org_lwjgl_system_ThreadLocalUtil_setFunctionMissingAddresses: () => {},
 
-  // MemoryAccessJNI (Complete off-heap pointer and primitive accessors)
   Java_org_lwjgl_system_MemoryAccessJNI_getPointerSize: () => 4,
   Java_org_lwjgl_system_MemoryAccessJNI_malloc: () => symRegistry.register("malloc", (lib, s) => mem.malloc(lib, s)),
   Java_org_lwjgl_system_MemoryAccessJNI_calloc: () => symRegistry.register("calloc", (lib, n, s) => mem.calloc(lib, n, s)),
@@ -1510,7 +1529,6 @@ const baseExports = {
   Java_org_lwjgl_system_MemoryAccessJNI_nputDouble: (lib, ptr, val) => mem.writeFloat64(lib, ptr, val),
   Java_org_lwjgl_system_MemoryAccessJNI_nputAddress: (lib, ptr, val) => mem.writeInt32(lib, ptr, val),
 
-  // MemoryUtil & LibC
   Java_org_lwjgl_system_MemoryUtil_nmemAlloc: (lib, size) => mem.malloc(lib, size),
   Java_org_lwjgl_system_MemoryUtil_nmemAllocChecked: (lib, size) => mem.malloc(lib, size),
   Java_org_lwjgl_system_MemoryUtil_nmemCalloc: (lib, num, size) => mem.calloc(lib, num, size),
@@ -1532,7 +1550,6 @@ const baseExports = {
   Java_org_lwjgl_system_libc_LibCString_nmemset: (lib, ptr, val, bytes) => mem.memset(lib, ptr, val, bytes),
   Java_org_lwjgl_system_libc_LibCString_nmemcpy: (lib, dst, src, bytes) => mem.memcpy(lib, dst, src, bytes),
 
-  // JEmalloc
   Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1malloc: (lib, size) => mem.malloc(lib, size),
   Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1calloc: (lib, num, size) => mem.calloc(lib, num, size),
   Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1realloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
@@ -1543,7 +1560,6 @@ const baseExports = {
   Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1dallocx: (lib, ptr, flags) => mem.free(lib, ptr),
   Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1sdallocx: (lib, ptr, size, flags) => mem.free(lib, ptr),
 
-  // LibFFI (Used by LWJGL 3 Callback closures)
   Java_org_lwjgl_system_libffi_LibFFI_FFI_1DEFAULT_1ABI: () => 1,
   Java_org_lwjgl_system_libffi_LibFFI_FFI_1SYSV: () => 1,
   Java_org_lwjgl_system_libffi_LibFFI_FFI_1UNIX64: () => 2,
@@ -1571,7 +1587,6 @@ const baseExports = {
   Java_org_lwjgl_system_libffi_LibFFI_nffi_1prep_1closure_1loc: () => 0,
   Java_org_lwjgl_system_Callback_getNativeCallbacks: () => 1,
 
-  // POSIX DynamicLinkLoader (dlopen / dlsym)
   Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlopen(lib, filenamePtr, mode) {
     const name = mem.readCString(lib, filenamePtr);
     window.webforgeLog?.(`[dlopen] Loaded shared library: "${name || "process"}"`, "glfw");
@@ -1584,10 +1599,8 @@ const baseExports = {
   Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlerror: () => 0,
   Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlclose: () => 0,
 
-  // GL Function Provider
   Java_org_lwjgl_opengl_GL_getFunctionProvider: () => 1,
 
-  // STBImage
   Java_org_lwjgl_stb_STBImage_nstbi_1set_1flip_1vertically_1on_1load: stbDispatch.nstbi_set_flip_vertically_on_load,
   Java_org_lwjgl_stb_STBImage_nstbi_1failure_1reason: stbDispatch.nstbi_failure_reason,
   Java_org_lwjgl_stb_STBImage_nstbi_1info_1from_1memory: stbDispatch.nstbi_info_from_memory,
@@ -1595,14 +1608,12 @@ const baseExports = {
   Java_org_lwjgl_stb_STBImage_nstbi_1image_1free: stbDispatch.nstbi_image_free
 };
 
-// Populate all GLFW functions
 for (const [fnName, fnImpl] of Object.entries(glfwDispatch)) {
   symRegistry.register(fnName, fnImpl);
   baseExports[`Java_org_lwjgl_glfw_GLFW_${fnName}`] = fnImpl;
   baseExports[`Java_org_lwjgl_glfw_GLFW_n${fnName}`] = fnImpl;
 }
 
-// Populate all OpenGL functions across GL11..GL46 and GL11C..GL46C
 const glClasses = [
   "GL11", "GL11C", "GL12", "GL12C", "GL13", "GL13C", "GL14", "GL14C",
   "GL15", "GL15C", "GL20", "GL20C", "GL21", "GL21C", "GL30", "GL30C",
@@ -1618,7 +1629,6 @@ for (const [glName, glImpl] of Object.entries(glDispatch)) {
   }
 }
 
-// Populate all OpenAL functions
 for (const [alName, alImpl] of Object.entries(alDispatch)) {
   symRegistry.register(alName, alImpl);
   baseExports[`Java_org_lwjgl_openal_ALC10_${alName}`] = alImpl;
@@ -1627,7 +1637,6 @@ for (const [alName, alImpl] of Object.entries(alDispatch)) {
   baseExports[`Java_org_lwjgl_openal_AL10_n${alName}`] = alImpl;
 }
 
-// Explicitly pre-populate all LWJGL 3 org.lwjgl.system.JNI.invoke* and call* signatures
 const jniSignatures = [
   "V", "Z", "B", "S", "C", "I", "J", "F", "D", "P",
   "PV", "PZ", "PI", "PJ", "PF", "PD", "PP",
