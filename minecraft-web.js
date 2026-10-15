@@ -1,17 +1,15 @@
 /**
  * WebForge 1.20.1 Client & Persistent IndexedDB Dependency Engine
  *
- * 1. Stores your Prism Launcher `libraries/` folder and `mods/` permanently in IndexedDB
- *    (`WebForge1201StorageDB`), so you only ever select them once.
- * 2. Stores all Minecraft worlds, saves, options.txt, and configs in CheerpJ's
- *    persistent IndexedDB `/files/game` mount (`cjFS_/files`).
- * 3. Eliminates `repo1.maven.org` CORS failures by checking IndexedDB -> Local Repo ->
- *    `libraries.minecraft.net` -> Automatic CORS Proxy Fallbacks.
+ * Includes:
+ * - In-memory /str/00_version_fix.jar generator so DetectedVersion (/version.json)
+ *   never gets shadowed by Forge's profile version.json.
+ * - Smart Prism library conflict filter (excludes other MC versions & installer shims).
+ * - Persistent IndexedDB storage for Prism libraries, Mods, and Worlds (/files/game/saves).
  */
 
 const MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
-// Hosted on Mojang's official libraries.minecraft.net CDN (replaces blocked repo1.maven.org links)
 const LWJGL3_CORE_JARS = [
   "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar",
   "https://libraries.minecraft.net/org/lwjgl/lwjgl-glfw/3.3.1/lwjgl-glfw-3.3.1.jar",
@@ -22,7 +20,6 @@ const LWJGL3_CORE_JARS = [
   "https://libraries.minecraft.net/org/lwjgl/lwjgl-tinyfd/3.3.1/lwjgl-tinyfd-3.3.1.jar"
 ];
 
-// Forge 1.20.1 (47.4.28) Required Libraries
 const FORGE_1201_MAVEN_LIBS = [
   "https://maven.minecraftforge.net/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar",
   "https://maven.minecraftforge.net/cpw/mods/securejarhandler/2.1.10/securejarhandler-2.1.10.jar",
@@ -54,6 +51,114 @@ const FORGE_1201_MAVEN_LIBS = [
   "https://maven.minecraftforge.net/org/openjdk/nashorn/nashorn-core/15.4/nashorn-core-15.4.jar"
 ];
 
+/**
+ * Builds a valid uncompressed JAR/ZIP in memory containing Mojang's exact
+ * Minecraft 1.20.1 /version.json so DetectedVersion never fails when Forge JARs
+ * are on the classpath.
+ */
+function buildVersionFixJarBytes() {
+  const versionJsonObj = {
+    id: "1.20.1",
+    name: "1.20.1",
+    world_version: 3465,
+    series_id: "main",
+    protocol_version: 763,
+    pack_version: {
+      resource: 15,
+      data: 15
+    },
+    build_time: "2023-06-09T11:26:18+00:00",
+    java_component: "java-runtime-gamma",
+    java_version: 17,
+    stable: true
+  };
+
+  const nameBytes = new TextEncoder().encode("version.json");
+  const dataBytes = new TextEncoder().encode(JSON.stringify(versionJsonObj, null, 2));
+
+  // Standard CRC-32 calculation required by java.util.zip.ZipFile
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < dataBytes.length; i++) {
+    crc ^= dataBytes[i];
+    for (let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    }
+  }
+  crc = (crc ^ 0xFFFFFFFF) >>> 0;
+
+  const localHeaderLen = 30 + nameBytes.length;
+  const cdOffset = localHeaderLen + dataBytes.length;
+  const cdLen = 46 + nameBytes.length;
+  const totalLen = cdOffset + cdLen + 22;
+
+  const out = new Uint8Array(totalLen);
+  const dv = new DataView(out.buffer);
+
+  // 1. Local File Header
+  dv.setUint32(0, 0x04034b50, true);
+  dv.setUint16(4, 10, true);
+  dv.setUint16(6, 0, true);
+  dv.setUint16(8, 0, true); // STORE (uncompressed)
+  dv.setUint16(10, 0, true);
+  dv.setUint16(12, 0, true);
+  dv.setUint32(14, crc, true);
+  dv.setUint32(18, dataBytes.length, true);
+  dv.setUint32(22, dataBytes.length, true);
+  dv.setUint16(26, nameBytes.length, true);
+  dv.setUint16(28, 0, true);
+  out.set(nameBytes, 30);
+  out.set(dataBytes, localHeaderLen);
+
+  // 2. Central Directory File Header
+  dv.setUint32(cdOffset + 0, 0x02014b50, true);
+  dv.setUint16(cdOffset + 4, 20, true);
+  dv.setUint16(cdOffset + 6, 10, true);
+  dv.setUint16(cdOffset + 8, 0, true);
+  dv.setUint16(cdOffset + 10, 0, true);
+  dv.setUint16(cdOffset + 12, 0, true);
+  dv.setUint16(cdOffset + 14, 0, true);
+  dv.setUint32(cdOffset + 16, crc, true);
+  dv.setUint32(cdOffset + 20, dataBytes.length, true);
+  dv.setUint32(cdOffset + 24, dataBytes.length, true);
+  dv.setUint16(cdOffset + 28, nameBytes.length, true);
+  dv.setUint16(cdOffset + 30, 0, true);
+  dv.setUint16(cdOffset + 32, 0, true);
+  dv.setUint16(cdOffset + 34, 0, true);
+  dv.setUint16(cdOffset + 36, 0, true);
+  dv.setUint32(cdOffset + 38, 0, true);
+  dv.setUint32(cdOffset + 42, 0, true);
+  out.set(nameBytes, cdOffset + 46);
+
+  // 3. End of Central Directory Record (EOCD)
+  const eocd = cdOffset + cdLen;
+  dv.setUint32(eocd + 0, 0x06054b50, true);
+  dv.setUint16(eocd + 4, 0, true);
+  dv.setUint16(eocd + 6, 0, true);
+  dv.setUint16(eocd + 8, 1, true);
+  dv.setUint16(eocd + 10, 1, true);
+  dv.setUint32(eocd + 12, cdLen, true);
+  dv.setUint32(eocd + 16, cdOffset, true);
+  dv.setUint16(eocd + 20, 0, true);
+
+  return out;
+}
+
+/**
+ * Filters out non-library or conflicting JARs from a Prism Launcher `libraries/` folder.
+ */
+function isValid1201LibraryJar(fileName) {
+  const lower = fileName.toLowerCase();
+  if (!lower.endsWith(".jar")) return false;
+  if (lower.includes("2.9.")) return false; // Exclude LWJGL 2.9
+  if (lower.includes("-natives-")) return false; // Exclude C++ native binaries
+  if (lower.includes("macos") || lower.includes("windows")) return false;
+  if (lower.includes("-installer") || lower.includes("-shim")) return false;
+  if (lower.includes("forge-") && (lower.includes("-launcher") || lower.includes("-client"))) return false;
+  // Exclude other Minecraft client JARs from Prism's global cache
+  if (lower.startsWith("minecraft-") && !lower.includes("1.20.1")) return false;
+  return true;
+}
+
 class PersistentStorageDB {
   #dbPromise = null;
 
@@ -63,13 +168,13 @@ class PersistentStorageDB {
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains("prism_libs")) {
-          db.createObjectStore("prism_libs"); // key: filename -> Uint8Array
+          db.createObjectStore("prism_libs");
         }
         if (!db.objectStoreNames.contains("cloud_libs")) {
-          db.createObjectStore("cloud_libs"); // key: filename -> Uint8Array
+          db.createObjectStore("cloud_libs");
         }
         if (!db.objectStoreNames.contains("mods")) {
-          db.createObjectStore("mods"); // key: filename -> Uint8Array
+          db.createObjectStore("mods");
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -231,19 +336,9 @@ export default class MinecraftClient extends HTMLElement {
     await this.#storageDB.clearAll();
   }
 
-  /**
-   * Saves all valid 1.20.1 JARs from the user's Prism Launcher `libraries/` folder
-   * permanently into IndexedDB so they never need to be re-uploaded or fetched.
-   */
   async savePrismLibsToDB(fileList, onProgress, log) {
-    const jarFiles = fileList.filter(f =>
-      f.name.endsWith(".jar") &&
-      !f.name.includes("2.9.") &&
-      !f.name.includes("-natives-") &&
-      !f.name.includes("macos") &&
-      !f.name.includes("windows")
-    );
-    log(`Saving ${jarFiles.length} JARs from Prism 'libraries/' folder into IndexedDB...`, "glfw");
+    const jarFiles = fileList.filter(f => isValid1201LibraryJar(f.name));
+    log(`Saving ${jarFiles.length} filtered 1.20.1 JARs from Prism 'libraries/' folder into IndexedDB...`, "glfw");
     let count = 0;
     for (const file of jarFiles) {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -254,12 +349,9 @@ export default class MinecraftClient extends HTMLElement {
         onProgress?.(pct, `Saving Prism Libs to DB: ${count}/${jarFiles.length}`);
       }
     }
-    log(`Permanently saved ${count} Prism libraries into IndexedDB! They will now auto-mount on every boot.`, "info");
+    log(`Permanently saved ${count} Prism libraries into IndexedDB!`, "info");
   }
 
-  /**
-   * Saves uploaded Mod JARs permanently into IndexedDB.
-   */
   async saveModsToDB(fileList, log) {
     const jarFiles = fileList.filter(f => f.name.endsWith(".jar") || f.name.endsWith(".zip"));
     for (const file of jarFiles) {
@@ -269,22 +361,13 @@ export default class MinecraftClient extends HTMLElement {
     }
   }
 
-  /**
-   * Smart CORS-Proof Library Resolver:
-   * 1. Checks IndexedDB `prism_libs` and `cloud_libs`
-   * 2. Checks your GitHub Repo root (`./<fileName>` and `./libs/<fileName>`)
-   * 3. Tries direct CDN URL (`libraries.minecraft.net` / `maven.minecraftforge.net`)
-   * 4. Falls back to CORS proxies (`corsproxy.io` / `allorigins.win`) if a Maven server blocks CORS
-   */
   async #fetchSmart(remoteUrl, fileName, log) {
-    // 1. Check IndexedDB Prism Libs or Cloud Libs first
     const fromPrism = await this.#storageDB.get("prism_libs", fileName);
     if (fromPrism && fromPrism.byteLength > 0) return fromPrism;
 
     const fromCloud = await this.#storageDB.get("cloud_libs", fileName);
     if (fromCloud && fromCloud.byteLength > 0) return fromCloud;
 
-    // 2. Check if the user uploaded the file directly into the GitHub repo root or ./libs/
     const localCandidates = [
       new URL(fileName, import.meta.url).href,
       new URL(`libs/${fileName}`, import.meta.url).href
@@ -294,7 +377,7 @@ export default class MinecraftClient extends HTMLElement {
         const res = await fetch(localUrl);
         if (res.ok) {
           const bytes = new Uint8Array(await res.arrayBuffer());
-          if (bytes.byteLength > 100 && bytes[0] === 0x50 && bytes[1] === 0x4B) { // Valid ZIP/JAR 'PK' header
+          if (bytes.byteLength > 100 && bytes[0] === 0x50 && bytes[1] === 0x4B) {
             await this.#storageDB.set("cloud_libs", fileName, bytes);
             return bytes;
           }
@@ -302,7 +385,6 @@ export default class MinecraftClient extends HTMLElement {
       } catch (_) {}
     }
 
-    // 3. Try direct CDN URL + CORS-Proxy fallbacks
     const candidateUrls = [
       remoteUrl,
       `https://corsproxy.io/?${encodeURIComponent(remoteUrl)}`,
@@ -331,18 +413,30 @@ export default class MinecraftClient extends HTMLElement {
     const mountedPaths = [];
     const mountedFileNames = new Set();
 
-    // 1. Mount Base Client, StupidForgeLauncher wrapper, & Forge Universal JARs from Repo Root
-    onProgress(5, "Mounting base 1.20.1 JARs...");
-    try {
-      const wrapperBytes = await this.#fetchSmart(
-        new URL("minecraftforgelib.jar", import.meta.url).href,
-        "minecraftforgelib.jar",
-        log
-      );
-      cheerpOSAddStringFile("/str/minecraftforgelib.jar", wrapperBytes);
-      mountedPaths.push("/str/minecraftforgelib.jar");
-    } catch (_) {}
+    // 1. Mount In-Memory /str/00_version_fix.jar FIRST so /version.json is ALWAYS valid 1.20.1
+    const versionFixBytes = buildVersionFixJarBytes();
+    cheerpOSAddStringFile("/str/00_version_fix.jar", versionFixBytes);
+    mountedPaths.push("/str/00_version_fix.jar");
+    log("Injected /str/00_version_fix.jar at classpath index 0 (Protects 1.20.1 /version.json)", "glfw");
 
+    // 2. Mount All 7 Official LWJGL 3.3.1 Core JARs Second
+    onProgress(5, "Mounting LWJGL 3.3.1 JARs...");
+    for (const lwjglUrl of LWJGL3_CORE_JARS) {
+      const fileName = lwjglUrl.split("/").pop();
+      if (mountedFileNames.has(fileName)) continue;
+      try {
+        const bytes = await this.#fetchSmart(lwjglUrl, fileName, log);
+        const vPath = `/str/libs_${fileName}`;
+        cheerpOSAddStringFile(vPath, bytes);
+        mountedPaths.push(vPath);
+        mountedFileNames.add(fileName);
+      } catch (e) {
+        log(`Warning fetching ${fileName}: ${e.message}`, "warn");
+      }
+    }
+
+    // 3. Mount Base minecraft-1.20.1-client.jar BEFORE bulk libraries so its assets/data/version.json take priority
+    onProgress(12, "Mounting base 1.20.1 JARs...");
     log("Mounting minecraft-1.20.1-client.jar...", "net");
     const clientBytes = await this.#fetchSmart(
       new URL("minecraft-1.20.1-client.jar", import.meta.url).href,
@@ -350,6 +444,7 @@ export default class MinecraftClient extends HTMLElement {
       log
     );
     cheerpOSAddStringFile("/str/minecraft-1.20.1-client.jar", clientBytes);
+    mountedPaths.push("/str/minecraft-1.20.1-client.jar");
     mountedFileNames.add("minecraft-1.20.1-client.jar");
     log(`Mounted /str/minecraft-1.20.1-client.jar (${(clientBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
 
@@ -366,42 +461,40 @@ export default class MinecraftClient extends HTMLElement {
       log(`Mounted /str/forge-1.20.1-47.4.28-universal.jar (${(forgeBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
     }
 
-    // 2. Check if user has saved their Prism `libraries/` folder in IndexedDB
+    try {
+      const wrapperBytes = await this.#fetchSmart(
+        new URL("minecraftforgelib.jar", import.meta.url).href,
+        "minecraftforgelib.jar",
+        log
+      );
+      cheerpOSAddStringFile("/str/minecraftforgelib.jar", wrapperBytes);
+      mountedPaths.push("/str/minecraftforgelib.jar");
+      mountedFileNames.add("minecraftforgelib.jar");
+    } catch (_) {}
+
+    // 4. Load Saved Prism Libraries from IndexedDB (filtering out conflicting JARs)
     const savedPrismLibs = await this.#storageDB.getAllEntries("prism_libs");
     if (savedPrismLibs.length > 0) {
-      log(`Loading ${savedPrismLibs.length} libraries directly from Persistent IndexedDB...`, "glfw");
+      log(`Filtering & loading ${savedPrismLibs.length} libraries from Persistent IndexedDB...`, "glfw");
       let count = 0;
       for (const entry of savedPrismLibs) {
         if (mountedFileNames.has(entry.name)) continue;
+        if (!isValid1201LibraryJar(entry.name)) continue;
+        // In Vanilla mode, skip Forge universal/fml JARs so they don't interfere
+        if (mode === "vanilla" && entry.name.startsWith("forge-")) continue;
+
         const vPath = `/str/libs_${entry.name}`;
         cheerpOSAddStringFile(vPath, entry.bytes);
         mountedPaths.push(vPath);
         mountedFileNames.add(entry.name);
         count++;
-        if (count % 15 === 0 || count === savedPrismLibs.length) {
-          onProgress(15 + (count / savedPrismLibs.length) * 75, `Mounted ${count}/${savedPrismLibs.length} DB libs...`);
+        if (count % 20 === 0 || count === savedPrismLibs.length) {
+          onProgress(20 + (count / savedPrismLibs.length) * 70, `Mounted ${count} DB libs...`);
         }
       }
     }
 
-    // 3. Ensure all 7 LWJGL 3.3.1 Core JARs are mounted (from DB, Repo, or Mojang CDN)
-    onProgress(20, "Mounting LWJGL 3.3.1 JARs...");
-    for (const lwjglUrl of LWJGL3_CORE_JARS) {
-      const fileName = lwjglUrl.split("/").pop();
-      if (mountedFileNames.has(fileName)) continue;
-      try {
-        const bytes = await this.#fetchSmart(lwjglUrl, fileName, log);
-        const vPath = `/str/libs_${fileName}`;
-        cheerpOSAddStringFile(vPath, bytes);
-        mountedPaths.unshift(vPath); // Keep LWJGL 3.3.1 at the front of the classpath
-        mountedFileNames.add(fileName);
-        log(`Mounted LWJGL 3 JAR: ${vPath} (${(bytes.byteLength / 1024).toFixed(1)} KB)`, "glfw");
-      } catch (e) {
-        log(`Warning fetching ${fileName}: ${e.message}`, "warn");
-      }
-    }
-
-    // 4. If Prism libraries weren't in IndexedDB yet, fetch remaining 1.20.1 libraries from Mojang CDN
+    // 5. If Prism libraries weren't in IndexedDB yet, fetch from Mojang CDN
     if (savedPrismLibs.length < 20) {
       log("Querying Mojang Piston-Meta CDN for remaining 1.20.1 libraries...", "net");
       const manifestRes = await fetch(MOJANG_VERSION_MANIFEST_URL);
@@ -416,10 +509,8 @@ export default class MinecraftClient extends HTMLElement {
       for (const libEntry of versionData.libraries) {
         const artifact = libEntry.downloads?.artifact;
         if (!artifact || !artifact.url) continue;
-        if (artifact.path.includes("-natives-") || artifact.path.includes("macos") || artifact.path.includes("windows")) {
-          continue;
-        }
         const fileName = artifact.path.split("/").pop();
+        if (!isValid1201LibraryJar(fileName)) continue;
         if (!mountedFileNames.has(fileName)) {
           mountedFileNames.add(fileName);
           downloadQueue.push({ url: artifact.url, name: fileName });
@@ -451,7 +542,7 @@ export default class MinecraftClient extends HTMLElement {
             cheerpOSAddStringFile(mountName, bytes);
             mountedPaths.push(mountName);
           } catch (err) {
-            log(`Skipped optional/blocked lib ${item.name} (Tip: use Prism 'libraries/' folder picker above to load locally)`, "warn");
+            log(`Skipped optional lib ${item.name}`, "warn");
           }
           completed++;
           const pct = 25 + Math.round((completed / downloadQueue.length) * 65);
@@ -466,7 +557,6 @@ export default class MinecraftClient extends HTMLElement {
       await Promise.all(workers);
     }
 
-    mountedPaths.push("/str/minecraft-1.20.1-client.jar");
     log(`Successfully mounted ${mountedPaths.length} total 1.20.1 + LWJGL 3.3.1 libraries!`, "glfw");
     return mountedPaths;
   }
@@ -475,7 +565,6 @@ export default class MinecraftClient extends HTMLElement {
     if (this.#isRunning) throw new Error("Instance is already running.");
     this.#isRunning = true;
 
-    // 1. Load all saved Mods from IndexedDB and mount to /str/mod_<name>
     const modClasspaths = [];
     const savedMods = await this.#storageDB.getAllEntries("mods");
     if (savedMods.length > 0) {
@@ -488,19 +577,18 @@ export default class MinecraftClient extends HTMLElement {
         modManifestNames.push(mod.name);
         log(`Mounted Mod from DB: ${mod.name}`, "info");
       }
-      // Write a manifest list in /str/mods_list.txt so StupidForgeLauncher can copy them into /files/game/mods/
       const listBytes = new TextEncoder().encode(modManifestNames.join("\n"));
       cheerpOSAddStringFile("/str/mods_list.txt", listBytes);
     }
 
-    // 2. Resolve and mount all 1.20.1 & LWJGL 3.3.1 libraries
     const libPaths = await this.#resolveAndMountLibraries({
       mode,
       onProgress,
       log
     });
 
-    const fullClasspath = [...modClasspaths, ...libPaths].join(":");
+    // Keep /str/00_version_fix.jar at the very front of the classpath!
+    const fullClasspath = [...libPaths, ...modClasspaths].join(":");
     onProgress(95, "Starting JVM Main Thread...");
 
     const rect = this.#canvas.getBoundingClientRect();
