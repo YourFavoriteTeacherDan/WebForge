@@ -17,29 +17,29 @@
         background: #070709;
       }
       #top-bar {
-        padding: 12px 18px;
+        padding: 10px 16px;
         background: #121216;
         border-bottom: 1px solid #27272a;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 12px;
+        gap: 10px;
         z-index: 20;
       }
       .brand {
         font-weight: 800;
-        font-size: 16px;
+        font-size: 15px;
         color: #00e676;
         letter-spacing: 0.4px;
-        margin-right: 8px;
+        margin-right: 4px;
       }
       .control-group {
         display: flex;
         align-items: center;
         gap: 6px;
-        font-size: 13px;
+        font-size: 12px;
         background: #18181c;
-        padding: 5px 10px;
+        padding: 5px 9px;
         border-radius: 6px;
         border: 1px solid #27272a;
       }
@@ -47,19 +47,19 @@
         background: #09090b;
         border: 1px solid #3f3f46;
         color: #f4f4f5;
-        padding: 5px 8px;
+        padding: 4px 7px;
         border-radius: 4px;
-        font-size: 13px;
+        font-size: 12px;
       }
       .btn {
-        padding: 8px 14px;
+        padding: 7px 13px;
         background: #00e676;
         color: #050505;
         font-weight: 700;
         border: none;
         border-radius: 5px;
         cursor: pointer;
-        font-size: 13px;
+        font-size: 12px;
         transition: all 0.15s ease;
       }
       .btn:hover:not(:disabled) { background: #00c853; transform: translateY(-1px); }
@@ -70,6 +70,15 @@
         border: 1px solid #3f3f46;
       }
       .btn-secondary:hover:not(:disabled) { background: #3f3f46; }
+      #db-stats {
+        font-family: monospace;
+        font-size: 11px;
+        color: #38bdf8;
+        background: rgba(56, 189, 248, 0.1);
+        padding: 5px 8px;
+        border-radius: 5px;
+        border: 1px solid rgba(56, 189, 248, 0.25);
+      }
       #status-banner {
         font-family: monospace;
         font-size: 12px;
@@ -126,11 +135,11 @@
   <body>
 
     <div id="top-bar">
-      <div class="brand">WEBFORGE 1.20.1 [LWJGL 3]</div>
+      <div class="brand">WEBFORGE 1.20.1</div>
 
       <div class="control-group">
         <label for="username-input">User:</label>
-        <input type="text" id="username-input" value="Player" style="width:95px;">
+        <input type="text" id="username-input" value="Player" style="width:85px;">
       </div>
 
       <div class="control-group">
@@ -143,18 +152,20 @@
       </div>
 
       <div class="control-group">
-        <label title="Optional: Pick your local Prism Launcher libraries/ folder to skip cloud downloading">
-          Prism Libs Folder:
+        <label title="Select your Prism Launcher libraries/ folder ONCE — it saves permanently to IndexedDB!">
+          Save Prism `libraries/` to DB:
         </label>
-        <input type="file" id="prism-libs-input" webkitdirectory directory multiple style="width:170px; font-size:11px;">
+        <input type="file" id="prism-libs-input" webkitdirectory directory multiple style="width:155px; font-size:11px;">
       </div>
 
       <div class="control-group">
-        <label>Mods (.jar):</label>
-        <input type="file" id="mod-upload" multiple accept=".jar" style="width:140px; font-size:11px;">
+        <label title="Upload Mod JARs — saved permanently in IndexedDB!">Save Mods (.jar) to DB:</label>
+        <input type="file" id="mod-upload" multiple accept=".jar" style="width:135px; font-size:11px;">
       </div>
 
-      <button id="clear-cache-btn" class="btn btn-secondary" title="Clear IndexedDB cached libraries">Clear Lib Cache</button>
+      <div id="db-stats">IndexedDB: Checking...</div>
+
+      <button id="clear-cache-btn" class="btn btn-secondary" title="Clear cached libraries & mods in IndexedDB (keeps Worlds)">Clear Lib/Mod DB</button>
       <button id="start-btn" class="btn" disabled>Boot 1.20.1 Engine</button>
 
       <div id="status-banner">Initializing CheerpJ 4.2...</div>
@@ -176,6 +187,7 @@
 
       const consolePane = document.getElementById("console-pane");
       const statusBanner = document.getElementById("status-banner");
+      const dbStats = document.getElementById("db-stats");
       const progressFill = document.getElementById("progress-fill");
       const startBtn = document.getElementById("start-btn");
       const clearCacheBtn = document.getElementById("clear-cache-btn");
@@ -205,9 +217,22 @@
       console.warn = (...a) => { log(a.join(" "), "warn"); origWarn(...a); };
       console.error = (...a) => { log(a.join(" "), "err"); origErr(...a); };
 
-      // Plain object combining explicit LWJGL 3 + Netlib JNI functions (no Proxy traps)
+      // Request persistent IndexedDB storage so the browser never deletes worlds (/files/game/saves) or libraries
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().then(persisted => {
+          log(`Browser Persistent IndexedDB Storage (Worlds, Saves, Libs, Mods): ${persisted ? "LOCKED & PERSISTENT" : "ACTIVE"}`, "glfw");
+        });
+      }
+
       const combinedNatives = Object.assign({}, lwjglNatives, netlibNatives);
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
+
+      async function refreshDBStats() {
+        if (typeof mcElement.getStorageSummary === "function") {
+          const summary = await mcElement.getStorageSummary();
+          dbStats.textContent = `DB Saved: ${summary.prismLibs} Prism Libs | ${summary.cloudLibs} Cloud Libs | ${summary.mods} Mods | Worlds: /files/game/saves`;
+        }
+      }
 
       try {
         log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table...", "glfw");
@@ -224,47 +249,82 @@
             "org.lwjgl.system.allocator=system",
             "org.lwjgl.glfw.checkThread0=false",
             "java.awt.headless=false",
+            "fml.earlyprogresswindow=false",
             "fml.ignoreInvalidMinecraftCertificates=true",
             "fml.ignorePatchDiscrepancies=true"
           ]
         });
 
-        // Register custom element AFTER cheerpjInit so cheerpjCreateDisplay is valid
         MinecraftClient.register();
+        await refreshDBStats();
 
         statusBanner.textContent = "JVM 17 Ready.";
         statusBanner.style.color = "#00e676";
-        log("CheerpJ 17 & LWJGL 3 Native Bridge Ready. Click 'Boot 1.20.1 Engine' to launch.", "glfw");
+        log("CheerpJ 17 & LWJGL 3 Native Bridge Ready.", "glfw");
+        log("TIP: Select your Prism Launcher 'libraries' folder once above to save all 1.20.1 JARs into IndexedDB permanently (bypasses all CORS/network downloads)!", "warn");
         startBtn.disabled = false;
       } catch (err) {
         log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
         statusBanner.textContent = "Init Failed";
       }
 
+      // Immediately save selected Prism libraries folder into IndexedDB
+      prismLibsInput.addEventListener("change", async () => {
+        const files = Array.from(prismLibsInput.files || []);
+        if (!files.length) return;
+        startBtn.disabled = true;
+        try {
+          await mcElement.savePrismLibsToDB(files, (pct, msg) => {
+            progressFill.style.width = `${pct}%`;
+            statusBanner.textContent = msg;
+          }, log);
+          await refreshDBStats();
+          statusBanner.textContent = "Prism Libraries Saved to DB!";
+        } catch (e) {
+          log(`Failed saving Prism libraries to DB: ${e.message}`, "err");
+        } finally {
+          startBtn.disabled = false;
+        }
+      });
+
+      // Immediately save selected Mods into IndexedDB
+      modUploadInput.addEventListener("change", async () => {
+        const files = Array.from(modUploadInput.files || []);
+        if (!files.length) return;
+        startBtn.disabled = true;
+        try {
+          await mcElement.saveModsToDB(files, log);
+          await refreshDBStats();
+          statusBanner.textContent = "Mods Saved to DB!";
+        } catch (e) {
+          log(`Failed saving mods to DB: ${e.message}`, "err");
+        } finally {
+          startBtn.disabled = false;
+        }
+      });
+
       clearCacheBtn.addEventListener("click", async () => {
         await mcElement.clearLibraryCache();
-        log("Cleared IndexedDB library cache.", "warn");
+        await refreshDBStats();
+        log("Cleared cached Libraries and Mods from IndexedDB (Your Worlds in /files/game/saves are untouched).", "warn");
       });
 
       startBtn.addEventListener("click", async () => {
         startBtn.disabled = true;
         const mode = launchModeSelect.value;
         const username = usernameInput.value || "Player";
-        const localLibFiles = Array.from(prismLibsInput.files || []);
-        const modFiles = Array.from(modUploadInput.files || []);
 
         try {
           await mcElement.run1201({
             mode,
             username,
-            localLibFiles,
-            modFiles,
             onProgress(pct, statusMsg) {
               progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
               if (statusMsg) statusBanner.textContent = statusMsg;
             },
             log
           });
+          await refreshDBStats();
         } catch (err) {
           log(`EXECUTION HALTED: ${err.message || err}`, "err");
           if (err.stack) log(err.stack, "err");
