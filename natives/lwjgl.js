@@ -1,7 +1,8 @@
 // ============================================================================
-// WebForge Unified LWJGL 3.3.1 Engine (v5)
-// Shared Wasm Linear Heap Arena + GLFW 3.3.8 + WebGL 2 Core (GLSL 150 -> 300 es)
-// + Async STBImage Texture Decoder + OpenAL 1.1 + Strict LWJGL JNI Router
+// WebForge Unified LWJGL 3.3.1 Engine (v6)
+// Includes Java 17 NativeLibraries.load Bridge (Fixes JVM_LoadLibrary),
+// Shared Wasm Linear Heap Arena, GLFW 3.3.8, WebGL 2 Core (GLSL 150 -> 300 es),
+// Async STBImage Texture Decoder, and OpenAL 1.1
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -153,8 +154,8 @@ function ensureGLContext() {
 // ============================================================================
 class WasmHeapMemoryManager {
   constructor() {
-    this.allocations = new Map(); // ptr -> size
-    this.freeList = []; // [{ ptr, size }]
+    this.allocations = new Map();
+    this.freeList = [];
     this.jsFallbackBlocks = new Map();
     this.nextFallbackPtr = 0x50000000;
     this.wasmArenaPtr = 0;
@@ -171,9 +172,8 @@ class WasmHeapMemoryManager {
         if (v && v.buffer !== this.rawBuffer) {
           this.rawBuffer = v.buffer;
           this.heapView = new Uint8Array(v.buffer);
-          // Initialize shared arena inside upper half of Wasm linear memory
-          if (this.wasmArenaPtr === 0 && v.byteLength >= 0x00400000) {
-            this.wasmArenaPtr = (Math.floor(v.byteLength * 0.35) + 15) & ~15;
+          if (this.wasmArenaPtr === 0 && v.byteLength >= 0x00800000) {
+            this.wasmArenaPtr = (Math.max(0x00600000, v.byteLength - 0x00400000) + 15) & ~15;
             this.wasmArenaEnd = v.byteLength - 65536;
           }
         }
@@ -188,7 +188,6 @@ class WasmHeapMemoryManager {
     const byteSize = Math.max(16, Number(size) || 16);
     const alignedSize = (byteSize + 15) & ~15;
 
-    // 1. Reuse a freed block from the Wasm arena if available
     for (let i = 0; i < this.freeList.length; i++) {
       const entry = this.freeList[i];
       if (entry.size >= alignedSize && entry.size <= alignedSize * 2) {
@@ -198,7 +197,6 @@ class WasmHeapMemoryManager {
       }
     }
 
-    // 2. Allocate directly inside Wasm linear memory so Java Unsafe & JS share bytes
     if (this.heapView && this.wasmArenaPtr > 0 && this.wasmArenaPtr + alignedSize < this.wasmArenaEnd) {
       const ptr = this.wasmArenaPtr;
       this.wasmArenaPtr += alignedSize;
@@ -206,7 +204,6 @@ class WasmHeapMemoryManager {
       return ptr;
     }
 
-    // 3. Fallback to JS Uint8Array if Wasm arena is full
     const ptr = this.nextFallbackPtr;
     this.nextFallbackPtr += alignedSize + 16;
     const block = new Uint8Array(alignedSize);
@@ -865,10 +862,10 @@ const glDispatch = {
     ensureGLContext();
     const p = Number(pname);
     let val = 0;
-    if (p === 0x821B) val = 3; // GL_MAJOR_VERSION
-    else if (p === 0x821C) val = 3; // GL_MINOR_VERSION
+    if (p === 0x821B) val = 3;
+    else if (p === 0x821C) val = 3;
     else if (p === 0x821D) val = SUPPORTED_GL_EXTENSIONS.length;
-    else if (p === 0x9126) val = 1; // GL_CONTEXT_CORE_PROFILE_BIT
+    else if (p === 0x9126) val = 1;
     else if (p === 0x0D33) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_TEXTURE_SIZE)) || 8192;
     else if (p === 0x84E8) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_RENDERBUFFER_SIZE)) || 8192;
     else if (p === 0x8872) val = 16;
@@ -1386,7 +1383,7 @@ const glDispatch = {
     ensureGLContext()?.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
   },
   glCheckFramebufferStatus(lib, target) {
-    return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
+    return 0x8CD5;
   },
   glBlitFramebuffer(lib, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
     ensureGLContext()?.blitFramebuffer?.(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
@@ -1430,7 +1427,7 @@ const glDispatch = {
 };
 
 // ============================================================================
-// 5. STBImage PNG/JPEG Hardware Decoder (Writes directly into Shared Wasm Heap)
+// 5. STBImage PNG/JPEG Hardware Decoder
 // ============================================================================
 let stbiFlipVertically = false;
 
@@ -1526,7 +1523,7 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Explicit Export Table + Strict LWJGL Proxy
+// 7. Explicit Export Table + OpenJDK 17 NativeLibraries Bridge
 // ============================================================================
 const jniInvokeHandler = function(lib, ...args) {
   const funcPtr = args[args.length - 1];
@@ -1537,7 +1534,16 @@ const jniInvokeHandler = function(lib, ...args) {
 let cachedJniEnvStructPtr = 0;
 
 const baseExports = {
-  // Valid non-null JNINativeInterface_ pointer structure for ThreadLocalUtil
+  // CRITICAL FIX: Intercepts OpenJDK 17's NativeLibraries.load so LWJGL 3's
+  // System.load("/str/lwjgl.js") succeeds immediately without calling JVM_LoadLibrary!
+  Java_jdk_internal_loader_NativeLibraries_load(lib, impl, nameObj, isBuiltin, isJNI, throwExceptionIfFail) {
+    return 1; // JNI_TRUE
+  },
+  Java_jdk_internal_loader_NativeLibraries_unload(lib, nameObj, isBuiltin, isJNI, handle) {
+  },
+
+  Java_org_lwjgl_system_SharedLibraryUtil_getLibraryPath: () => 0,
+
   Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv(lib) {
     if (!cachedJniEnvStructPtr) {
       const jniInterfaceTable = mem.calloc(lib, 300, 4);
@@ -1713,7 +1719,6 @@ for (const sig of jniSignatures) {
   baseExports[`Java_org_lwjgl_system_JNI_call${sig}`] = jniInvokeHandler;
 }
 
-// Strict LWJGL-only Proxy: ONLY intercepts strings starting with "Java_org_lwjgl_"
 function createStrictLWJGLProxy(targetObj, logFn) {
   return new Proxy(targetObj, {
     has(target, prop) {
