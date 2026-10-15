@@ -1,12 +1,13 @@
 /**
  * WebForge 1.20.1 Client & Dependency Engine
  * Explicitly fetches and mounts LWJGL 3.3.1 JARs, Mojang 1.20.1 libraries,
- * and Forge 47.4.28 Maven dependencies into CheerpJ's /str/ memory filesystem.
+ * and Forge 47.4.28 Maven dependencies into CheerpJ's /str/ memory filesystem
+ * without calling cheerpjRunLibrary("").
  */
 
 const MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 
-// Guaranteed LWJGL 3.3.1 Core & Module JARs (replaces lwjgl-2.9.0.jar)
+// Official LWJGL 3.3.1 Core & Module JARs
 const LWJGL3_CORE_JARS = [
   "https://repo1.maven.org/maven2/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1.jar",
   "https://repo1.maven.org/maven2/org/lwjgl/lwjgl-glfw/3.3.1/lwjgl-glfw-3.3.1.jar",
@@ -147,9 +148,11 @@ export default class MinecraftClient extends HTMLElement {
     window.lwjglCanvasElement = this.#canvas;
 
     this.#display = shadowRoot.querySelector(".display");
-    if (typeof cheerpjCreateDisplay === "function") {
-      cheerpjCreateDisplay(-1, -1, this.#display);
-    }
+    try {
+      if (typeof cheerpjCreateDisplay === "function") {
+        cheerpjCreateDisplay(-1, -1, this.#display);
+      }
+    } catch (_) {}
 
     const updateSize = () => {
       const rect = this.#canvas.getBoundingClientRect();
@@ -193,25 +196,11 @@ export default class MinecraftClient extends HTMLElement {
     return bytes;
   }
 
-  async #ensureDirectories(paths) {
-    if (!window.cjLib) return;
-    try {
-      const Files = await window.cjLib.java.nio.file.Files;
-      const Paths = await window.cjLib.java.nio.file.Paths;
-      for (const p of paths) {
-        const dirPath = await Paths.get(p);
-        await Files.createDirectories(dirPath);
-      }
-    } catch (e) {
-      console.warn("Directory creation warning:", e);
-    }
-  }
-
   async #resolveAndMountLibraries({ mode, localLibFiles, onProgress, log }) {
     const mountedPaths = [];
     const mountedFileNames = new Set();
 
-    // 1. Explicitly Mount All 7 LWJGL 3.3.1 JARs First (Completely replaces lwjgl-2.9.0.jar)
+    // 1. Mount All 7 Official LWJGL 3.3.1 JARs First
     onProgress(3, "Fetching LWJGL 3.3.1 JARs...");
     log("Fetching & mounting LWJGL 3.3.1 core & GLFW/OpenGL/STB JARs...", "glfw");
     for (const lwjglUrl of LWJGL3_CORE_JARS) {
@@ -272,7 +261,7 @@ export default class MinecraftClient extends HTMLElement {
       return mountedPaths;
     }
 
-    // 4. Otherwise, Auto-Fetch Mojang 1.20.1 Official Manifest & Libraries via CDN
+    // 4. Auto-Fetch Mojang 1.20.1 Official Manifest & Libraries via CDN
     log("Querying Mojang Piston-Meta CDN for 1.20.1 dependency manifest...", "net");
     const manifestRes = await fetch(MOJANG_VERSION_MANIFEST_URL);
     const manifestJson = await manifestRes.json();
@@ -353,33 +342,15 @@ export default class MinecraftClient extends HTMLElement {
     if (this.#isRunning) throw new Error("Instance is already running.");
     this.#isRunning = true;
 
-    await this.#ensureDirectories([
-      "/files/game",
-      "/files/game/mods",
-      "/files/game/config",
-      "/files/game/resourcepacks",
-      "/files/assets",
-      "/files/assets/indexes",
-      "/files/assets/objects"
-    ]);
-
     const modClasspaths = [];
     if (modFiles && modFiles.length > 0) {
-      log(`Injecting ${modFiles.length} user mod(s)...`, "glfw");
-      const Files = await window.cjLib.java.nio.file.Files;
-      const Paths = await window.cjLib.java.nio.file.Paths;
-      const StandardCopyOption = await window.cjLib.java.nio.file.StandardCopyOption;
-
+      log(`Mounting ${modFiles.length} user mod(s) into /str/...`, "glfw");
       for (const file of modFiles) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const strPath = `/str/mod_${file.name}`;
         cheerpOSAddStringFile(strPath, bytes);
         modClasspaths.push(strPath);
-
-        const src = await Paths.get(strPath);
-        const dst = await Paths.get(`/files/game/mods/${file.name}`);
-        await Files.copy(src, dst, [StandardCopyOption.REPLACE_EXISTING]);
-        log(`Uploaded mod to /files/game/mods/${file.name}`, "info");
+        log(`Mounted mod: ${strPath}`, "info");
       }
     }
 
