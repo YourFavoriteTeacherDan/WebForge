@@ -1,12 +1,15 @@
 /**
- * WebForge 1.20.1 Client & Persistent IndexedDB Dependency Engine
+ * WebForge 1.20.1 Client & Persistent IndexedDB Dependency Engine (v4)
  *
  * Includes:
- * - Binary ZIP/JAR Scrubber (`scrubVersionJsonInJar`) that renames root `version.json`
- *   to `_ersion.json` in all mounted JARs so `DetectedVersion.tryDetectVersion()`
- *   always uses `DetectedVersion.BUILT_IN` and NEVER crashes with
- *   "Game version information is corrupt: Missing name".
- * - Persistent IndexedDB storage for Prism libraries, Mods, and Worlds (/files/game/saves).
+ * 1. Binary ZIP/JAR Scrubber (`scrubJarHeadersInPlace`) that neutralizes embedded
+ *    `version.json` AND `log4j2.xml` inside JARs so Minecraft 1.20.1 uses
+ *    `DetectedVersion.BUILT_IN` and our safe `/str/log4j2.xml` (preventing
+ *    `UnsatisfiedLinkError: Java_java_lang_SecurityManager_getClassContext` and
+ *    `TerminalConsoleAppender` pipe errors).
+ * 2. Automatic Artifact Deduplicator so having 168 JARs from multiple Minecraft
+ *    versions in your Prism `libraries/` folder never causes version clashes
+ *    (like `oshi-core-6.2.2` vs `oshi-core-6.9.0`).
  */
 
 const MOJANG_VERSION_MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -47,66 +50,99 @@ const FORGE_1201_MAVEN_LIBS = [
   "https://maven.minecraftforge.net/com/electronwill/night-config/core/3.6.4/core-3.6.4.jar",
   "https://maven.minecraftforge.net/com/electronwill/night-config/toml/3.6.4/toml-3.6.4.jar",
   "https://maven.minecraftforge.net/org/apache/maven/maven-artifact/3.8.5/maven-artifact-3.8.5.jar",
-  "https://maven.minecraftforge.net/net/jodah/typetools/0.6.3/typetools-0.6.3.jar",
-  "https://maven.minecraftforge.net/net/minecrell/terminalconsoleappender/1.3.0/terminalconsoleappender-1.3.0.jar",
-  "https://maven.minecraftforge.net/org/openjdk/nashorn/nashorn-core/15.4/nashorn-core-15.4.jar"
+  "https://maven.minecraftforge.net/net/jodah/typetools/0.6.3/typetools-0.6.3.jar"
 ];
 
+// Official Minecraft 1.20.1 Library Filenames (Preferred when deduplicating Prism folder)
+const PREFERRED_1201_JARS = new Set([
+  "ca-objc-1.2.jar", " text2speech-1.17.9.jar", "oshi-core-6.2.2.jar",
+  "jna-5.12.1.jar", "jna-platform-5.12.1.jar", "slf4j-api-2.0.1.jar",
+  "icu4j-71.1.jar", "netty-buffer-4.1.82.Final.jar", "netty-codec-4.1.82.Final.jar",
+  "netty-common-4.1.82.Final.jar", "netty-handler-4.1.82.Final.jar",
+  "netty-resolver-4.1.82.Final.jar", "netty-transport-4.1.82.Final.jar",
+  "netty-transport-classes-epoll-4.1.82.Final.jar", "netty-transport-native-unix-common-4.1.82.Final.jar",
+  "patchy-2.2.10.jar", "commons-lang3-3.12.0.jar", "commons-io-2.11.0.jar",
+  "commons-codec-1.15.jar", "brigadier-1.1.8.jar", "datafixerupper-6.0.8.jar",
+  "gson-2.10.jar", "authlib-4.0.43.jar", "commons-compress-1.21.jar",
+  "httpclient-4.5.13.jar", "httpcore-4.4.15.jar", "commons-logging-1.2.jar",
+  "fastutil-8.5.9.jar", "log4j-api-2.19.0.jar", "log4j-core-2.19.0.jar",
+  "log4j-slf4j2-impl-2.19.0.jar", "guava-31.1-jre.jar", "failureaccess-1.0.1.jar",
+  "jsr305-3.0.2.jar", "joml-1.10.5.jar", "jopt-simple-5.0.4.jar"
+]);
+
 /**
- * Scans a JAR Uint8Array for any ZIP Local Header or Central Directory Header
- * named "version.json" (12 bytes: 76 65 72 73 69 6f 6e 2e 6a 73 6f 6e) and renames
- * it in-place to "_ersion.json" (5f 65 72 73 69 6f 6e 2e 6a 73 6f 6e).
- *
- * This forces Minecraft 1.20.1's `DetectedVersion.tryDetectVersion()` to receive `null`
- * from `getResourceAsStream("/version.json")` and return `DetectedVersion.BUILT_IN`,
- * completely preventing `IllegalStateException: Game version information is corrupt`.
+ * Scrubs ZIP/JAR headers in-place:
+ * 1. Renames root `version.json` -> `_ersion.json` so DetectedVersion uses BUILT_IN.
+ * 2. Renames root `log4j2.xml` -> `_og4j2.xml` so Log4j2 uses `/str/log4j2.xml`
+ *    (which uses `%ex` instead of `%xEx`/`%tEx`, preventing `SecurityManager.getClassContext`).
  */
-function scrubVersionJsonInJar(bytes, jarName, log) {
+function scrubJarHeadersInPlace(bytes, jarName, log) {
   if (!bytes || bytes.byteLength < 30) return bytes;
-  // ASCII for "version.json"
-  const target = [0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x2e, 0x6a, 0x73, 0x6f, 0x6e];
   const len = bytes.byteLength - 12;
-  let patchedCount = 0;
 
   for (let i = 0; i <= len; i++) {
-    if (
-      bytes[i] === 0x76 &&
-      bytes[i + 1] === 0x65 &&
-      bytes[i + 2] === 0x72 &&
-      bytes[i + 3] === 0x73 &&
-      bytes[i + 4] === 0x69 &&
-      bytes[i + 5] === 0x6f &&
-      bytes[i + 6] === 0x6e &&
-      bytes[i + 7] === 0x2e &&
-      bytes[i + 8] === 0x6a &&
-      bytes[i + 9] === 0x73 &&
-      bytes[i + 10] === 0x6f &&
-      bytes[i + 11] === 0x6e
-    ) {
-      // Only rename if it's a root entry (not preceded by '/')
-      const prevByte = i > 0 ? bytes[i - 1] : 0;
-      if (prevByte !== 0x2f /* '/' */) {
-        bytes[i] = 0x5f; // '_' -> "_ersion.json"
-        patchedCount++;
-      }
-    }
-  }
+    const prevByte = i > 0 ? bytes[i - 1] : 0;
+    if (prevByte === 0x2f /* '/' */) continue;
 
-  if (patchedCount > 0 && log) {
-    log(`[Scrubber] Neutralized ${patchedCount} 'version.json' header(s) in ${jarName} -> using BUILT_IN 1.20.1 version`, "glfw");
+    // Match "version.json" (76 65 72 73 69 6f 6e 2e 6a 73 6f 6e)
+    if (
+      bytes[i] === 0x76 && bytes[i + 1] === 0x65 && bytes[i + 2] === 0x72 &&
+      bytes[i + 3] === 0x73 && bytes[i + 4] === 0x69 && bytes[i + 5] === 0x6f &&
+      bytes[i + 6] === 0x6e && bytes[i + 7] === 0x2e && bytes[i + 8] === 0x6a &&
+      bytes[i + 9] === 0x73 && bytes[i + 10] === 0x6f && bytes[i + 11] === 0x6e
+    ) {
+      bytes[i] = 0x5f; // '_ersion.json'
+    }
+
+    // Match "log4j2.xml" (6c 6f 67 34 6a 32 2e 78 6d 6c)
+    if (
+      bytes[i] === 0x6c && bytes[i + 1] === 0x6f && bytes[i + 2] === 0x67 &&
+      bytes[i + 3] === 0x34 && bytes[i + 4] === 0x6a && bytes[i + 5] === 0x32 &&
+      bytes[i + 6] === 0x2e && bytes[i + 7] === 0x78 && bytes[i + 8] === 0x6d &&
+      bytes[i + 9] === 0x6c
+    ) {
+      bytes[i] = 0x5f; // '_og4j2.xml'
+    }
   }
   return bytes;
 }
 
-function isValid1201LibraryJar(fileName) {
+/**
+ * Extracts the base artifact name without version numbers so we never mount two
+ * versions of the same library (e.g. `oshi-core-6.2.2.jar` and `oshi-core-6.9.0.jar`).
+ */
+function getArtifactKey(fileName) {
+  return fileName.replace(/-\d[\dA-Za-z._-]*\.jar$/i, "").toLowerCase();
+}
+
+function isValid1201LibraryJar(fileName, mode = "forge") {
   const lower = fileName.toLowerCase();
   if (!lower.endsWith(".jar")) return false;
   if (lower.includes("2.9.")) return false;
   if (lower.includes("-natives-")) return false;
   if (lower.includes("macos") || lower.includes("windows")) return false;
   if (lower.includes("-installer") || lower.includes("-shim")) return false;
+  if (lower.includes("terminalconsoleappender") || lower.includes("jline") || lower.includes("jansi")) return false;
   if (lower.includes("forge-") && (lower.includes("-launcher") || lower.includes("-client"))) return false;
   if (lower.startsWith("minecraft-") && !lower.includes("1.20.1")) return false;
+
+  // In Vanilla mode, keep Forge/ModLauncher jars off the classpath
+  if (mode === "vanilla") {
+    if (
+      lower.startsWith("forge-") ||
+      lower.startsWith("fmlloader") ||
+      lower.startsWith("fmlcore") ||
+      lower.startsWith("modlauncher") ||
+      lower.startsWith("bootstraplauncher") ||
+      lower.startsWith("securejarhandler") ||
+      lower.startsWith("javafmllanguage") ||
+      lower.startsWith("mclanguage") ||
+      lower.startsWith("lowcodelanguage") ||
+      lower.startsWith("coremods")
+    ) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -288,12 +324,12 @@ export default class MinecraftClient extends HTMLElement {
   }
 
   async savePrismLibsToDB(fileList, onProgress, log) {
-    const jarFiles = fileList.filter(f => isValid1201LibraryJar(f.name));
+    const jarFiles = fileList.filter(f => isValid1201LibraryJar(f.name, "forge"));
     log(`Saving ${jarFiles.length} filtered 1.20.1 JARs from Prism 'libraries/' folder into IndexedDB...`, "glfw");
     let count = 0;
     for (const file of jarFiles) {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      scrubVersionJsonInJar(bytes, file.name, log);
+      scrubJarHeadersInPlace(bytes, file.name, log);
       await this.#storageDB.set("prism_libs", file.name, bytes);
       count++;
       if (count % 10 === 0 || count === jarFiles.length) {
@@ -362,13 +398,14 @@ export default class MinecraftClient extends HTMLElement {
   }
 
   #mountJarToCheerpJ(virtualPath, bytes, jarName, log) {
-    scrubVersionJsonInJar(bytes, jarName, log);
+    scrubJarHeadersInPlace(bytes, jarName, log);
     cheerpOSAddStringFile(virtualPath, bytes);
   }
 
   async #resolveAndMountLibraries({ mode, onProgress, log }) {
     const mountedPaths = [];
     const mountedFileNames = new Set();
+    const mountedArtifactKeys = new Set();
 
     // 1. Mount All 7 Official LWJGL 3.3.1 Core JARs First
     onProgress(5, "Mounting LWJGL 3.3.1 JARs...");
@@ -381,12 +418,13 @@ export default class MinecraftClient extends HTMLElement {
         this.#mountJarToCheerpJ(vPath, bytes, fileName, log);
         mountedPaths.push(vPath);
         mountedFileNames.add(fileName);
+        mountedArtifactKeys.add(getArtifactKey(fileName));
       } catch (e) {
         log(`Warning fetching ${fileName}: ${e.message}`, "warn");
       }
     }
 
-    // 2. Mount Base minecraft-1.20.1-client.jar (with version.json scrubbed so BUILT_IN is used)
+    // 2. Mount Base minecraft-1.20.1-client.jar
     onProgress(12, "Mounting base 1.20.1 JARs...");
     log("Mounting minecraft-1.20.1-client.jar...", "net");
     const clientBytes = await this.#fetchSmart(
@@ -397,6 +435,7 @@ export default class MinecraftClient extends HTMLElement {
     this.#mountJarToCheerpJ("/str/minecraft-1.20.1-client.jar", clientBytes, "minecraft-1.20.1-client.jar", log);
     mountedPaths.push("/str/minecraft-1.20.1-client.jar");
     mountedFileNames.add("minecraft-1.20.1-client.jar");
+    mountedArtifactKeys.add("minecraft-client");
     log(`Mounted /str/minecraft-1.20.1-client.jar (${(clientBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
 
     if (mode.startsWith("forge")) {
@@ -409,6 +448,7 @@ export default class MinecraftClient extends HTMLElement {
       this.#mountJarToCheerpJ("/str/forge-1.20.1-47.4.28-universal.jar", forgeBytes, "forge-1.20.1-47.4.28-universal.jar", log);
       mountedPaths.push("/str/forge-1.20.1-47.4.28-universal.jar");
       mountedFileNames.add("forge-1.20.1-47.4.28-universal.jar");
+      mountedArtifactKeys.add("forge-universal");
       log(`Mounted /str/forge-1.20.1-47.4.28-universal.jar (${(forgeBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
     }
 
@@ -423,26 +463,40 @@ export default class MinecraftClient extends HTMLElement {
       mountedFileNames.add("minecraftforgelib.jar");
     } catch (_) {}
 
-    // 3. Load Saved Prism Libraries from IndexedDB (scrubbing any embedded version.json)
+    // 3. Load Saved Prism Libraries from IndexedDB (with version deduplication!)
     const savedPrismLibs = await this.#storageDB.getAllEntries("prism_libs");
     if (savedPrismLibs.length > 0) {
-      log(`Filtering & scrubbing ${savedPrismLibs.length} libraries from Persistent IndexedDB...`, "glfw");
+      // Sort so official 1.20.1 versions are picked first before 1.21+ versions
+      savedPrismLibs.sort((a, b) => {
+        const aPref = PREFERRED_1201_JARS.has(a.name) ? 0 : 1;
+        const bPref = PREFERRED_1201_JARS.has(b.name) ? 0 : 1;
+        if (aPref !== bPref) return aPref - bPref;
+        return a.name.localeCompare(b.name);
+      });
+
+      log(`Deduplicating & scrubbing ${savedPrismLibs.length} libraries from IndexedDB...`, "glfw");
       let count = 0;
       for (const entry of savedPrismLibs) {
         if (mountedFileNames.has(entry.name)) continue;
-        if (!isValid1201LibraryJar(entry.name)) continue;
-        if (mode === "vanilla" && entry.name.startsWith("forge-")) continue;
+        if (!isValid1201LibraryJar(entry.name, mode)) continue;
+
+        const artifactKey = getArtifactKey(entry.name);
+        if (mountedArtifactKeys.has(artifactKey)) {
+          continue; // Skip duplicate version (e.g. skips oshi-core-6.9.0.jar after mounting oshi-core-6.2.2.jar)
+        }
 
         const vPath = `/str/libs_${entry.name}`;
         const copyBytes = new Uint8Array(entry.bytes);
         this.#mountJarToCheerpJ(vPath, copyBytes, entry.name, log);
         mountedPaths.push(vPath);
         mountedFileNames.add(entry.name);
+        mountedArtifactKeys.add(artifactKey);
         count++;
-        if (count % 20 === 0 || count === savedPrismLibs.length) {
-          onProgress(20 + (count / savedPrismLibs.length) * 70, `Mounted ${count} DB libs...`);
+        if (count % 20 === 0) {
+          onProgress(20 + (count / savedPrismLibs.length) * 70, `Mounted ${count} unique DB libs...`);
         }
       }
+      log(`Mounted ${count} unique, deduplicated 1.20.1 libraries from IndexedDB!`, "glfw");
     }
 
     // 4. If Prism libraries weren't in IndexedDB yet, fetch from Mojang CDN
@@ -461,9 +515,11 @@ export default class MinecraftClient extends HTMLElement {
         const artifact = libEntry.downloads?.artifact;
         if (!artifact || !artifact.url) continue;
         const fileName = artifact.path.split("/").pop();
-        if (!isValid1201LibraryJar(fileName)) continue;
-        if (!mountedFileNames.has(fileName)) {
+        if (!isValid1201LibraryJar(fileName, mode)) continue;
+        const artifactKey = getArtifactKey(fileName);
+        if (!mountedFileNames.has(fileName) && !mountedArtifactKeys.has(artifactKey)) {
           mountedFileNames.add(fileName);
+          mountedArtifactKeys.add(artifactKey);
           downloadQueue.push({ url: artifact.url, name: fileName });
         }
       }
@@ -471,8 +527,10 @@ export default class MinecraftClient extends HTMLElement {
       if (mode.startsWith("forge")) {
         for (const forgeUrl of FORGE_1201_MAVEN_LIBS) {
           const fileName = forgeUrl.split("/").pop();
-          if (!mountedFileNames.has(fileName)) {
+          const artifactKey = getArtifactKey(fileName);
+          if (!mountedFileNames.has(fileName) && !mountedArtifactKeys.has(artifactKey)) {
             mountedFileNames.add(fileName);
+            mountedArtifactKeys.add(artifactKey);
             downloadQueue.push({ url: forgeUrl, name: fileName });
           }
         }
