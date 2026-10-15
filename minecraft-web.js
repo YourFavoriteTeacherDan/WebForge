@@ -2,9 +2,10 @@
  * WebForge 1.20.1 Client & Persistent IndexedDB Dependency Engine
  *
  * Includes:
- * - In-memory /str/00_version_fix.jar generator so DetectedVersion (/version.json)
- *   never gets shadowed by Forge's profile version.json.
- * - Smart Prism library conflict filter (excludes other MC versions & installer shims).
+ * - Binary ZIP/JAR Scrubber (`scrubVersionJsonInJar`) that renames root `version.json`
+ *   to `_ersion.json` in all mounted JARs so `DetectedVersion.tryDetectVersion()`
+ *   always uses `DetectedVersion.BUILT_IN` and NEVER crashes with
+ *   "Game version information is corrupt: Missing name".
  * - Persistent IndexedDB storage for Prism libraries, Mods, and Worlds (/files/game/saves).
  */
 
@@ -52,109 +53,59 @@ const FORGE_1201_MAVEN_LIBS = [
 ];
 
 /**
- * Builds a valid uncompressed JAR/ZIP in memory containing Mojang's exact
- * Minecraft 1.20.1 /version.json so DetectedVersion never fails when Forge JARs
- * are on the classpath.
+ * Scans a JAR Uint8Array for any ZIP Local Header or Central Directory Header
+ * named "version.json" (12 bytes: 76 65 72 73 69 6f 6e 2e 6a 73 6f 6e) and renames
+ * it in-place to "_ersion.json" (5f 65 72 73 69 6f 6e 2e 6a 73 6f 6e).
+ *
+ * This forces Minecraft 1.20.1's `DetectedVersion.tryDetectVersion()` to receive `null`
+ * from `getResourceAsStream("/version.json")` and return `DetectedVersion.BUILT_IN`,
+ * completely preventing `IllegalStateException: Game version information is corrupt`.
  */
-function buildVersionFixJarBytes() {
-  const versionJsonObj = {
-    id: "1.20.1",
-    name: "1.20.1",
-    world_version: 3465,
-    series_id: "main",
-    protocol_version: 763,
-    pack_version: {
-      resource: 15,
-      data: 15
-    },
-    build_time: "2023-06-09T11:26:18+00:00",
-    java_component: "java-runtime-gamma",
-    java_version: 17,
-    stable: true
-  };
+function scrubVersionJsonInJar(bytes, jarName, log) {
+  if (!bytes || bytes.byteLength < 30) return bytes;
+  // ASCII for "version.json"
+  const target = [0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x2e, 0x6a, 0x73, 0x6f, 0x6e];
+  const len = bytes.byteLength - 12;
+  let patchedCount = 0;
 
-  const nameBytes = new TextEncoder().encode("version.json");
-  const dataBytes = new TextEncoder().encode(JSON.stringify(versionJsonObj, null, 2));
-
-  // Standard CRC-32 calculation required by java.util.zip.ZipFile
-  let crc = 0xFFFFFFFF;
-  for (let i = 0; i < dataBytes.length; i++) {
-    crc ^= dataBytes[i];
-    for (let j = 0; j < 8; j++) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+  for (let i = 0; i <= len; i++) {
+    if (
+      bytes[i] === 0x76 &&
+      bytes[i + 1] === 0x65 &&
+      bytes[i + 2] === 0x72 &&
+      bytes[i + 3] === 0x73 &&
+      bytes[i + 4] === 0x69 &&
+      bytes[i + 5] === 0x6f &&
+      bytes[i + 6] === 0x6e &&
+      bytes[i + 7] === 0x2e &&
+      bytes[i + 8] === 0x6a &&
+      bytes[i + 9] === 0x73 &&
+      bytes[i + 10] === 0x6f &&
+      bytes[i + 11] === 0x6e
+    ) {
+      // Only rename if it's a root entry (not preceded by '/')
+      const prevByte = i > 0 ? bytes[i - 1] : 0;
+      if (prevByte !== 0x2f /* '/' */) {
+        bytes[i] = 0x5f; // '_' -> "_ersion.json"
+        patchedCount++;
+      }
     }
   }
-  crc = (crc ^ 0xFFFFFFFF) >>> 0;
 
-  const localHeaderLen = 30 + nameBytes.length;
-  const cdOffset = localHeaderLen + dataBytes.length;
-  const cdLen = 46 + nameBytes.length;
-  const totalLen = cdOffset + cdLen + 22;
-
-  const out = new Uint8Array(totalLen);
-  const dv = new DataView(out.buffer);
-
-  // 1. Local File Header
-  dv.setUint32(0, 0x04034b50, true);
-  dv.setUint16(4, 10, true);
-  dv.setUint16(6, 0, true);
-  dv.setUint16(8, 0, true); // STORE (uncompressed)
-  dv.setUint16(10, 0, true);
-  dv.setUint16(12, 0, true);
-  dv.setUint32(14, crc, true);
-  dv.setUint32(18, dataBytes.length, true);
-  dv.setUint32(22, dataBytes.length, true);
-  dv.setUint16(26, nameBytes.length, true);
-  dv.setUint16(28, 0, true);
-  out.set(nameBytes, 30);
-  out.set(dataBytes, localHeaderLen);
-
-  // 2. Central Directory File Header
-  dv.setUint32(cdOffset + 0, 0x02014b50, true);
-  dv.setUint16(cdOffset + 4, 20, true);
-  dv.setUint16(cdOffset + 6, 10, true);
-  dv.setUint16(cdOffset + 8, 0, true);
-  dv.setUint16(cdOffset + 10, 0, true);
-  dv.setUint16(cdOffset + 12, 0, true);
-  dv.setUint16(cdOffset + 14, 0, true);
-  dv.setUint32(cdOffset + 16, crc, true);
-  dv.setUint32(cdOffset + 20, dataBytes.length, true);
-  dv.setUint32(cdOffset + 24, dataBytes.length, true);
-  dv.setUint16(cdOffset + 28, nameBytes.length, true);
-  dv.setUint16(cdOffset + 30, 0, true);
-  dv.setUint16(cdOffset + 32, 0, true);
-  dv.setUint16(cdOffset + 34, 0, true);
-  dv.setUint16(cdOffset + 36, 0, true);
-  dv.setUint32(cdOffset + 38, 0, true);
-  dv.setUint32(cdOffset + 42, 0, true);
-  out.set(nameBytes, cdOffset + 46);
-
-  // 3. End of Central Directory Record (EOCD)
-  const eocd = cdOffset + cdLen;
-  dv.setUint32(eocd + 0, 0x06054b50, true);
-  dv.setUint16(eocd + 4, 0, true);
-  dv.setUint16(eocd + 6, 0, true);
-  dv.setUint16(eocd + 8, 1, true);
-  dv.setUint16(eocd + 10, 1, true);
-  dv.setUint32(eocd + 12, cdLen, true);
-  dv.setUint32(eocd + 16, cdOffset, true);
-  dv.setUint16(eocd + 20, 0, true);
-
-  return out;
+  if (patchedCount > 0 && log) {
+    log(`[Scrubber] Neutralized ${patchedCount} 'version.json' header(s) in ${jarName} -> using BUILT_IN 1.20.1 version`, "glfw");
+  }
+  return bytes;
 }
 
-/**
- * Filters out non-library or conflicting JARs from a Prism Launcher `libraries/` folder.
- */
 function isValid1201LibraryJar(fileName) {
   const lower = fileName.toLowerCase();
   if (!lower.endsWith(".jar")) return false;
-  if (lower.includes("2.9.")) return false; // Exclude LWJGL 2.9
-  if (lower.includes("-natives-")) return false; // Exclude C++ native binaries
+  if (lower.includes("2.9.")) return false;
+  if (lower.includes("-natives-")) return false;
   if (lower.includes("macos") || lower.includes("windows")) return false;
   if (lower.includes("-installer") || lower.includes("-shim")) return false;
   if (lower.includes("forge-") && (lower.includes("-launcher") || lower.includes("-client"))) return false;
-  // Exclude other Minecraft client JARs from Prism's global cache
   if (lower.startsWith("minecraft-") && !lower.includes("1.20.1")) return false;
   return true;
 }
@@ -342,6 +293,7 @@ export default class MinecraftClient extends HTMLElement {
     let count = 0;
     for (const file of jarFiles) {
       const bytes = new Uint8Array(await file.arrayBuffer());
+      scrubVersionJsonInJar(bytes, file.name, log);
       await this.#storageDB.set("prism_libs", file.name, bytes);
       count++;
       if (count % 10 === 0 || count === jarFiles.length) {
@@ -363,10 +315,10 @@ export default class MinecraftClient extends HTMLElement {
 
   async #fetchSmart(remoteUrl, fileName, log) {
     const fromPrism = await this.#storageDB.get("prism_libs", fileName);
-    if (fromPrism && fromPrism.byteLength > 0) return fromPrism;
+    if (fromPrism && fromPrism.byteLength > 0) return new Uint8Array(fromPrism);
 
     const fromCloud = await this.#storageDB.get("cloud_libs", fileName);
-    if (fromCloud && fromCloud.byteLength > 0) return fromCloud;
+    if (fromCloud && fromCloud.byteLength > 0) return new Uint8Array(fromCloud);
 
     const localCandidates = [
       new URL(fileName, import.meta.url).href,
@@ -409,17 +361,16 @@ export default class MinecraftClient extends HTMLElement {
     throw new Error(`Could not fetch ${fileName} (${lastErr ? lastErr.message : "CORS/Network error"})`);
   }
 
+  #mountJarToCheerpJ(virtualPath, bytes, jarName, log) {
+    scrubVersionJsonInJar(bytes, jarName, log);
+    cheerpOSAddStringFile(virtualPath, bytes);
+  }
+
   async #resolveAndMountLibraries({ mode, onProgress, log }) {
     const mountedPaths = [];
     const mountedFileNames = new Set();
 
-    // 1. Mount In-Memory /str/00_version_fix.jar FIRST so /version.json is ALWAYS valid 1.20.1
-    const versionFixBytes = buildVersionFixJarBytes();
-    cheerpOSAddStringFile("/str/00_version_fix.jar", versionFixBytes);
-    mountedPaths.push("/str/00_version_fix.jar");
-    log("Injected /str/00_version_fix.jar at classpath index 0 (Protects 1.20.1 /version.json)", "glfw");
-
-    // 2. Mount All 7 Official LWJGL 3.3.1 Core JARs Second
+    // 1. Mount All 7 Official LWJGL 3.3.1 Core JARs First
     onProgress(5, "Mounting LWJGL 3.3.1 JARs...");
     for (const lwjglUrl of LWJGL3_CORE_JARS) {
       const fileName = lwjglUrl.split("/").pop();
@@ -427,7 +378,7 @@ export default class MinecraftClient extends HTMLElement {
       try {
         const bytes = await this.#fetchSmart(lwjglUrl, fileName, log);
         const vPath = `/str/libs_${fileName}`;
-        cheerpOSAddStringFile(vPath, bytes);
+        this.#mountJarToCheerpJ(vPath, bytes, fileName, log);
         mountedPaths.push(vPath);
         mountedFileNames.add(fileName);
       } catch (e) {
@@ -435,7 +386,7 @@ export default class MinecraftClient extends HTMLElement {
       }
     }
 
-    // 3. Mount Base minecraft-1.20.1-client.jar BEFORE bulk libraries so its assets/data/version.json take priority
+    // 2. Mount Base minecraft-1.20.1-client.jar (with version.json scrubbed so BUILT_IN is used)
     onProgress(12, "Mounting base 1.20.1 JARs...");
     log("Mounting minecraft-1.20.1-client.jar...", "net");
     const clientBytes = await this.#fetchSmart(
@@ -443,7 +394,7 @@ export default class MinecraftClient extends HTMLElement {
       "minecraft-1.20.1-client.jar",
       log
     );
-    cheerpOSAddStringFile("/str/minecraft-1.20.1-client.jar", clientBytes);
+    this.#mountJarToCheerpJ("/str/minecraft-1.20.1-client.jar", clientBytes, "minecraft-1.20.1-client.jar", log);
     mountedPaths.push("/str/minecraft-1.20.1-client.jar");
     mountedFileNames.add("minecraft-1.20.1-client.jar");
     log(`Mounted /str/minecraft-1.20.1-client.jar (${(clientBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
@@ -455,7 +406,7 @@ export default class MinecraftClient extends HTMLElement {
         "forge-1.20.1-47.4.28-universal.jar",
         log
       );
-      cheerpOSAddStringFile("/str/forge-1.20.1-47.4.28-universal.jar", forgeBytes);
+      this.#mountJarToCheerpJ("/str/forge-1.20.1-47.4.28-universal.jar", forgeBytes, "forge-1.20.1-47.4.28-universal.jar", log);
       mountedPaths.push("/str/forge-1.20.1-47.4.28-universal.jar");
       mountedFileNames.add("forge-1.20.1-47.4.28-universal.jar");
       log(`Mounted /str/forge-1.20.1-47.4.28-universal.jar (${(forgeBytes.byteLength / 1048576).toFixed(2)} MB)`, "info");
@@ -467,24 +418,24 @@ export default class MinecraftClient extends HTMLElement {
         "minecraftforgelib.jar",
         log
       );
-      cheerpOSAddStringFile("/str/minecraftforgelib.jar", wrapperBytes);
+      this.#mountJarToCheerpJ("/str/minecraftforgelib.jar", wrapperBytes, "minecraftforgelib.jar", log);
       mountedPaths.push("/str/minecraftforgelib.jar");
       mountedFileNames.add("minecraftforgelib.jar");
     } catch (_) {}
 
-    // 4. Load Saved Prism Libraries from IndexedDB (filtering out conflicting JARs)
+    // 3. Load Saved Prism Libraries from IndexedDB (scrubbing any embedded version.json)
     const savedPrismLibs = await this.#storageDB.getAllEntries("prism_libs");
     if (savedPrismLibs.length > 0) {
-      log(`Filtering & loading ${savedPrismLibs.length} libraries from Persistent IndexedDB...`, "glfw");
+      log(`Filtering & scrubbing ${savedPrismLibs.length} libraries from Persistent IndexedDB...`, "glfw");
       let count = 0;
       for (const entry of savedPrismLibs) {
         if (mountedFileNames.has(entry.name)) continue;
         if (!isValid1201LibraryJar(entry.name)) continue;
-        // In Vanilla mode, skip Forge universal/fml JARs so they don't interfere
         if (mode === "vanilla" && entry.name.startsWith("forge-")) continue;
 
         const vPath = `/str/libs_${entry.name}`;
-        cheerpOSAddStringFile(vPath, entry.bytes);
+        const copyBytes = new Uint8Array(entry.bytes);
+        this.#mountJarToCheerpJ(vPath, copyBytes, entry.name, log);
         mountedPaths.push(vPath);
         mountedFileNames.add(entry.name);
         count++;
@@ -494,7 +445,7 @@ export default class MinecraftClient extends HTMLElement {
       }
     }
 
-    // 5. If Prism libraries weren't in IndexedDB yet, fetch from Mojang CDN
+    // 4. If Prism libraries weren't in IndexedDB yet, fetch from Mojang CDN
     if (savedPrismLibs.length < 20) {
       log("Querying Mojang Piston-Meta CDN for remaining 1.20.1 libraries...", "net");
       const manifestRes = await fetch(MOJANG_VERSION_MANIFEST_URL);
@@ -539,7 +490,7 @@ export default class MinecraftClient extends HTMLElement {
           try {
             const bytes = await self.#fetchSmart(item.url, item.name, log);
             const mountName = `/str/libs_${item.name}`;
-            cheerpOSAddStringFile(mountName, bytes);
+            self.#mountJarToCheerpJ(mountName, bytes, item.name, log);
             mountedPaths.push(mountName);
           } catch (err) {
             log(`Skipped optional lib ${item.name}`, "warn");
@@ -572,7 +523,7 @@ export default class MinecraftClient extends HTMLElement {
       const modManifestNames = [];
       for (const mod of savedMods) {
         const strPath = `/str/mod_${mod.name}`;
-        cheerpOSAddStringFile(strPath, mod.bytes);
+        this.#mountJarToCheerpJ(strPath, new Uint8Array(mod.bytes), mod.name, log);
         modClasspaths.push(strPath);
         modManifestNames.push(mod.name);
         log(`Mounted Mod from DB: ${mod.name}`, "info");
@@ -587,7 +538,6 @@ export default class MinecraftClient extends HTMLElement {
       log
     });
 
-    // Keep /str/00_version_fix.jar at the very front of the classpath!
     const fullClasspath = [...libPaths, ...modClasspaths].join(":");
     onProgress(95, "Starting JVM Main Thread...");
 
@@ -642,10 +592,10 @@ export default class MinecraftClient extends HTMLElement {
         "--height", String(height)
       );
     } else {
-      log("Launching Forge 1.20.1 Unified Classpath Mode...", "glfw");
+      log("Launching Forge 1.20.1 Unified Classpath Mode via StupidForgeLauncher...", "glfw");
       onProgress(100, "Running Forge 1.20.1 (Unified)");
       return await cheerpjRunMain(
-        "net.minecraft.client.main.Main",
+        "StupidForgeLauncher",
         fullClasspath,
         "--username", username,
         "--version", "1.20.1-forge-47.4.28",
