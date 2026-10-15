@@ -1,6 +1,7 @@
 // ============================================================================
-// WebForge Explicit LWJGL 3.3.1 Native Table (v4)
-// Direct Wasm Linear Heap + Fallback Off-Heap Allocator
+// WebForge Unified LWJGL 3.3.1 Engine (v5)
+// Shared Wasm Linear Heap Arena + GLFW 3.3.8 + WebGL 2 Core (GLSL 150 -> 300 es)
+// + Async STBImage Texture Decoder + OpenAL 1.1 + Strict LWJGL JNI Router
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -148,13 +149,16 @@ function ensureGLContext() {
 }
 
 // ============================================================================
-// 1. Wasm Linear Memory & Off-Heap Pointer Subsystem
+// 1. Shared Wasm Linear Memory & Off-Heap Arena Manager
 // ============================================================================
 class WasmHeapMemoryManager {
   constructor() {
-    this.allocations = new Map();
+    this.allocations = new Map(); // ptr -> size
+    this.freeList = []; // [{ ptr, size }]
     this.jsFallbackBlocks = new Map();
     this.nextFallbackPtr = 0x50000000;
+    this.wasmArenaPtr = 0;
+    this.wasmArenaEnd = 0;
     this.scratchStringPtrs = new Map();
     this.rawBuffer = null;
     this.heapView = null;
@@ -167,6 +171,11 @@ class WasmHeapMemoryManager {
         if (v && v.buffer !== this.rawBuffer) {
           this.rawBuffer = v.buffer;
           this.heapView = new Uint8Array(v.buffer);
+          // Initialize shared arena inside upper half of Wasm linear memory
+          if (this.wasmArenaPtr === 0 && v.byteLength >= 0x00400000) {
+            this.wasmArenaPtr = (Math.floor(v.byteLength * 0.35) + 15) & ~15;
+            this.wasmArenaEnd = v.byteLength - 65536;
+          }
         }
         return v;
       } catch (_) {}
@@ -175,11 +184,31 @@ class WasmHeapMemoryManager {
   }
 
   malloc(lib, size) {
+    this.getDataView(lib);
     const byteSize = Math.max(16, Number(size) || 16);
     const alignedSize = (byteSize + 15) & ~15;
+
+    // 1. Reuse a freed block from the Wasm arena if available
+    for (let i = 0; i < this.freeList.length; i++) {
+      const entry = this.freeList[i];
+      if (entry.size >= alignedSize && entry.size <= alignedSize * 2) {
+        this.freeList.splice(i, 1);
+        this.allocations.set(entry.ptr, entry.size);
+        return entry.ptr;
+      }
+    }
+
+    // 2. Allocate directly inside Wasm linear memory so Java Unsafe & JS share bytes
+    if (this.heapView && this.wasmArenaPtr > 0 && this.wasmArenaPtr + alignedSize < this.wasmArenaEnd) {
+      const ptr = this.wasmArenaPtr;
+      this.wasmArenaPtr += alignedSize;
+      this.allocations.set(ptr, alignedSize);
+      return ptr;
+    }
+
+    // 3. Fallback to JS Uint8Array if Wasm arena is full
     const ptr = this.nextFallbackPtr;
     this.nextFallbackPtr += alignedSize + 16;
-
     const block = new Uint8Array(alignedSize);
     this.jsFallbackBlocks.set(ptr, block);
     this.allocations.set(ptr, alignedSize);
@@ -188,7 +217,9 @@ class WasmHeapMemoryManager {
 
   calloc(lib, num, size) {
     const total = Math.max(16, (Number(num) || 1) * (Number(size) || 1));
-    return this.malloc(lib, total);
+    const ptr = this.malloc(lib, total);
+    this.memset(lib, ptr, 0, total);
+    return ptr;
   }
 
   realloc(lib, ptr, newSize) {
@@ -208,8 +239,14 @@ class WasmHeapMemoryManager {
 
   free(lib, ptr) {
     const p = Number(ptr);
+    if (!p) return;
+    const sz = this.allocations.get(p);
     this.allocations.delete(p);
-    this.jsFallbackBlocks.delete(p);
+    if (this.jsFallbackBlocks.has(p)) {
+      this.jsFallbackBlocks.delete(p);
+    } else if (sz && sz >= 16 && this.freeList.length < 512) {
+      this.freeList.push({ ptr: p, size: sz });
+    }
   }
 
   memset(lib, ptr, val, size) {
@@ -231,12 +268,11 @@ class WasmHeapMemoryManager {
     if (p === 0) return null;
     const len = Number(byteLength) || this.allocations.get(p) || 256;
 
-    // 1. Check JS off-heap blocks (0x50000000+)
-    if (this.jsFallbackBlocks.has(p)) {
-      const blk = this.jsFallbackBlocks.get(p);
-      return blk.subarray(0, Math.min(len, blk.length));
-    }
     if (p >= 0x50000000) {
+      if (this.jsFallbackBlocks.has(p)) {
+        const blk = this.jsFallbackBlocks.get(p);
+        return blk.subarray(0, Math.min(len, blk.length));
+      }
       for (const [basePtr, blk] of this.jsFallbackBlocks.entries()) {
         if (p >= basePtr && p < basePtr + blk.byteLength) {
           const offset = p - basePtr;
@@ -245,7 +281,6 @@ class WasmHeapMemoryManager {
       }
     }
 
-    // 2. Check CheerpJ Wasm linear memory (for DirectByteBuffer & MemoryStack)
     this.getDataView(lib);
     if (this.heapView && p > 0 && p < this.heapView.byteLength) {
       return this.heapView.subarray(p, Math.min(this.heapView.byteLength, p + len));
@@ -257,13 +292,13 @@ class WasmHeapMemoryManager {
     return fallback.subarray(0, len);
   }
 
-  readCString(lib, ptr) {
+  readCString(lib, ptr, maxLen = 4096) {
     if (!ptr) return "";
     if (typeof ptr === "string") return ptr;
     const p = Number(ptr);
     if (!p) return "";
 
-    const slice = this.getSubarray(lib, p, 1024);
+    const slice = this.getSubarray(lib, p, maxLen);
     if (!slice) return "";
     let end = 0;
     while (end < slice.length && slice[end] !== 0) end++;
@@ -406,7 +441,7 @@ class NativeSymbolRegistry {
 const symRegistry = new NativeSymbolRegistry();
 
 // ============================================================================
-// 3. GLFW 3.3.x Complete Implementation
+// 3. GLFW 3.3.8 Complete Implementation
 // ============================================================================
 const GLFW_TRUE = 1;
 const GLFW_FALSE = 0;
@@ -463,7 +498,8 @@ const glfwDispatch = {
   glfwInit(lib) {
     ensureGLContext();
     glfwState.initialized = true;
-    window.webforgeLog?.("[GLFW] glfwInit() -> Context & Input Initialized", "glfw");
+    window.__glfwWindowOpened = true;
+    window.webforgeLog?.("[GLFW] glfwInit() -> WebGL 2 Context & Input Initialized!", "glfw");
     return GLFW_TRUE;
   },
   glfwTerminate(lib) {
@@ -493,6 +529,7 @@ const glfwDispatch = {
   glfwWindowHintString(lib, hint, valuePtr) {},
   glfwCreateWindow(lib, width, height, titlePtr, monitor, share) {
     ensureGLContext();
+    window.__glfwWindowOpened = true;
     glfwState.width = Number(width) || 854;
     glfwState.height = Number(height) || 480;
     glfwState.title = mem.readCString(lib, titlePtr) || "Minecraft 1.20.1";
@@ -814,7 +851,7 @@ const glDispatch = {
     let str = "";
     if (n === 0x1F00) str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
     else if (n === 0x1F01) str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
-    else if (n === 0x1F02) str = "3.2.0 WebForge WebGL 2.0";
+    else if (n === 0x1F02) str = "3.3.0 WebForge WebGL 2.0";
     else if (n === 0x8B8C) str = "1.50 WebForge GLSL ES 3.00";
     else if (n === 0x1F03) str = SUPPORTED_GL_EXTENSIONS.join(" ");
     return mem.allocCString(lib, str);
@@ -828,10 +865,10 @@ const glDispatch = {
     ensureGLContext();
     const p = Number(pname);
     let val = 0;
-    if (p === 0x821B) val = 3;
-    else if (p === 0x821C) val = 2;
+    if (p === 0x821B) val = 3; // GL_MAJOR_VERSION
+    else if (p === 0x821C) val = 3; // GL_MINOR_VERSION
     else if (p === 0x821D) val = SUPPORTED_GL_EXTENSIONS.length;
-    else if (p === 0x9126) val = 1;
+    else if (p === 0x9126) val = 1; // GL_CONTEXT_CORE_PROFILE_BIT
     else if (p === 0x0D33) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_TEXTURE_SIZE)) || 8192;
     else if (p === 0x84E8) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_RENDERBUFFER_SIZE)) || 8192;
     else if (p === 0x8872) val = 16;
@@ -1092,13 +1129,9 @@ const glDispatch = {
     let combined = "";
     for (let i = 0; i < c; i++) {
       const strAddr = mem.readInt32(lib, Number(stringsPtr) + i * 4);
-      const raw = mem.readCString(lib, strAddr);
-      if (lengthPtr) {
-        const len = mem.readInt32(lib, Number(lengthPtr) + i * 4);
-        combined += len > 0 ? raw.slice(0, len) : raw;
-      } else {
-        combined += raw;
-      }
+      const maxLen = lengthPtr ? mem.readInt32(lib, Number(lengthPtr) + i * 4) : 16384;
+      const raw = mem.readCString(lib, strAddr, maxLen > 0 ? maxLen : 16384);
+      combined += (maxLen > 0 && raw.length > maxLen) ? raw.slice(0, maxLen) : raw;
     }
     const transpiled = transpileGLSL150ToWebGL2(combined, glObjects.shaderTypes[id]);
     ctx.shaderSource(s, transpiled);
@@ -1353,7 +1386,7 @@ const glDispatch = {
     ensureGLContext()?.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
   },
   glCheckFramebufferStatus(lib, target) {
-    return 0x8CD5;
+    return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
   },
   glBlitFramebuffer(lib, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
     ensureGLContext()?.blitFramebuffer?.(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
@@ -1397,7 +1430,7 @@ const glDispatch = {
 };
 
 // ============================================================================
-// 5. STBImage PNG/JPEG Hardware Decoder
+// 5. STBImage PNG/JPEG Hardware Decoder (Writes directly into Shared Wasm Heap)
 // ============================================================================
 let stbiFlipVertically = false;
 
@@ -1493,7 +1526,7 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Explicit Plain-Object Export Table
+// 7. Explicit Export Table + Strict LWJGL Proxy
 // ============================================================================
 const jniInvokeHandler = function(lib, ...args) {
   const funcPtr = args[args.length - 1];
@@ -1501,8 +1534,18 @@ const jniInvokeHandler = function(lib, ...args) {
   return symRegistry.invoke(lib, funcPtr, callArgs);
 };
 
+let cachedJniEnvStructPtr = 0;
+
 const baseExports = {
-  Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv: (lib) => mem.calloc(lib, 256, 4),
+  // Valid non-null JNINativeInterface_ pointer structure for ThreadLocalUtil
+  Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv(lib) {
+    if (!cachedJniEnvStructPtr) {
+      const jniInterfaceTable = mem.calloc(lib, 300, 4);
+      cachedJniEnvStructPtr = mem.calloc(lib, 16, 4);
+      mem.writeInt32(lib, cachedJniEnvStructPtr, jniInterfaceTable);
+    }
+    return cachedJniEnvStructPtr;
+  },
   Java_org_lwjgl_system_ThreadLocalUtil_getFunctionMissingAbort: () => symRegistry.register("abort", () => 0),
   Java_org_lwjgl_system_ThreadLocalUtil_nsetupEnvData: (lib, count) => mem.calloc(lib, Number(count) || 256, 4),
   Java_org_lwjgl_system_ThreadLocalUtil_setFunctionMissingAddresses: () => {},
@@ -1669,5 +1712,52 @@ for (const sig of jniSignatures) {
   baseExports[`Java_org_lwjgl_system_JNI_invoke${sig}`] = jniInvokeHandler;
   baseExports[`Java_org_lwjgl_system_JNI_call${sig}`] = jniInvokeHandler;
 }
+
+// Strict LWJGL-only Proxy: ONLY intercepts strings starting with "Java_org_lwjgl_"
+function createStrictLWJGLProxy(targetObj, logFn) {
+  return new Proxy(targetObj, {
+    has(target, prop) {
+      if (prop in target) return true;
+      if (typeof prop === "string" && prop.startsWith("Java_org_lwjgl_")) return true;
+      return false;
+    },
+    get(target, prop, receiver) {
+      if (prop in target) return Reflect.get(target, prop, receiver);
+      if (typeof prop !== "string" || !prop.startsWith("Java_org_lwjgl_")) {
+        return Reflect.get(target, prop, receiver);
+      }
+
+      if (prop.startsWith("Java_org_lwjgl_system_JNI_invoke") || prop.startsWith("Java_org_lwjgl_system_JNI_call")) {
+        target[prop] = jniInvokeHandler;
+        return jniInvokeHandler;
+      }
+
+      const glMatch = prop.match(/^Java_org_lwjgl_opengl_[A-Za-z0-9_]+_n?(gl[A-Za-z0-9_]+)$/);
+      if (glMatch) {
+        const glSym = glMatch[1].replace(/_1/g, "_");
+        const fn = glDispatch[glSym] || function() { return 0; };
+        target[prop] = fn;
+        return fn;
+      }
+
+      const glfwMatch = prop.match(/^Java_org_lwjgl_glfw_GLFW_n?(glfw[A-Za-z0-9_]+)$/);
+      if (glfwMatch) {
+        const glfwSym = glfwMatch[1].replace(/_1/g, "_");
+        const fn = glfwDispatch[glfwSym] || function() { return 0; };
+        target[prop] = fn;
+        return fn;
+      }
+
+      const fallbackStub = function() {
+        logFn?.(`[Auto-Stubbed LWJGL JNI] ${prop}`, "warn");
+        return 0;
+      };
+      target[prop] = fallbackStub;
+      return fallbackStub;
+    }
+  });
+}
+
+baseExports.__createStrictLWJGLProxy = createStrictLWJGLProxy;
 
 export default baseExports;
