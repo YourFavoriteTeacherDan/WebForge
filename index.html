@@ -181,9 +181,9 @@
     </div>
 
     <script type="module">
-      import MinecraftClient from "./minecraft-web.js";
-      import lwjglNatives from "./natives/lwjgl.js";
-      import netlibNatives from "./natives/netlib.js";
+      import MinecraftClient from "./minecraft-web.js?v=1201_v3";
+      import lwjglNatives from "./natives/lwjgl.js?v=1201_v3";
+      import netlibNatives from "./natives/netlib.js?v=1201_v3";
 
       const consolePane = document.getElementById("console-pane");
       const statusBanner = document.getElementById("status-banner");
@@ -217,7 +217,6 @@
       console.warn = (...a) => { log(a.join(" "), "warn"); origWarn(...a); };
       console.error = (...a) => { log(a.join(" "), "err"); origErr(...a); };
 
-      // Request persistent IndexedDB storage so the browser never deletes worlds (/files/game/saves) or libraries
       if (navigator.storage && navigator.storage.persist) {
         navigator.storage.persist().then(persisted => {
           log(`Browser Persistent IndexedDB Storage (Worlds, Saves, Libs, Mods): ${persisted ? "LOCKED & PERSISTENT" : "ACTIVE"}`, "glfw");
@@ -235,7 +234,7 @@
       }
 
       try {
-        log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table...", "glfw");
+        log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table (v3)...", "glfw");
         await cheerpjInit({
           version: 17,
           status: "none",
@@ -249,6 +248,8 @@
             "org.lwjgl.system.allocator=system",
             "org.lwjgl.glfw.checkThread0=false",
             "java.awt.headless=false",
+            "log4j.skipJansi=true",
+            "log4j2.disable.jmx=true",
             "fml.earlyprogresswindow=false",
             "fml.ignoreInvalidMinecraftCertificates=true",
             "fml.ignorePatchDiscrepancies=true"
@@ -260,15 +261,13 @@
 
         statusBanner.textContent = "JVM 17 Ready.";
         statusBanner.style.color = "#00e676";
-        log("CheerpJ 17 & LWJGL 3 Native Bridge Ready.", "glfw");
-        log("TIP: Select your Prism Launcher 'libraries' folder once above to save all 1.20.1 JARs into IndexedDB permanently (bypasses all CORS/network downloads)!", "warn");
+        log("CheerpJ 17 & LWJGL 3 Native Bridge (v3) Ready.", "glfw");
         startBtn.disabled = false;
       } catch (err) {
         log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
         statusBanner.textContent = "Init Failed";
       }
 
-      // Immediately save selected Prism libraries folder into IndexedDB
       prismLibsInput.addEventListener("change", async () => {
         const files = Array.from(prismLibsInput.files || []);
         if (!files.length) return;
@@ -287,7 +286,6 @@
         }
       });
 
-      // Immediately save selected Mods into IndexedDB
       modUploadInput.addEventListener("change", async () => {
         const files = Array.from(modUploadInput.files || []);
         if (!files.length) return;
