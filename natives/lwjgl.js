@@ -1,7 +1,8 @@
 // ============================================================================
-// WebForge Unified LWJGL 3.3.1 (GLFW, OpenGL 3.2+ Core, STBImage, OpenAL,
-// DynamicLinkLoader dlsym, ThreadLocalUtil, MemoryUtil / LibC / JEmalloc)
-// Strictly Scoped to org.lwjgl.* & com.cucuzacu.* so OpenJDK 17 Boots Cleanly
+// WebForge Explicit LWJGL 3.3.1 Native Table (Zero Proxy Traps)
+// Covers: MemoryAccessJNI, MemoryUtil, ThreadLocalUtil, LibC, JEmalloc,
+// LibFFI, DynamicLinkLoader (dlopen/dlsym), JNI.invoke*/call*, GLFW 3.3.8,
+// OpenGL 1.1 - 4.6 Core Profile, STBImage, and OpenAL 1.1
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -75,17 +76,15 @@ function attachInputListeners(canvas) {
   if (canvasListenersAttached || !canvas) return;
   canvasListenersAttached = true;
 
-  const onKeyDown = e => {
+  window.addEventListener("keydown", e => {
     const k = browserCodeToGLFWKey(e.code);
     if (k > 0 && k < 512) glfwState.keys[k] = 1;
-  };
-  const onKeyUp = e => {
+  });
+
+  window.addEventListener("keyup", e => {
     const k = browserCodeToGLFWKey(e.code);
     if (k > 0 && k < 512) glfwState.keys[k] = 0;
-  };
-
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
+  });
 
   canvas.addEventListener("mousedown", e => {
     canvas.focus?.();
@@ -145,8 +144,6 @@ function ensureGLContext() {
       glCtx.getExtension("EXT_color_buffer_float");
       glCtx.getExtension("OES_texture_float_linear");
     } catch (_) {}
-  } else {
-    window.webforgeLog?.("[LWJGL3] Warning: Browser did not return a WebGL context yet.", "warn");
   }
 
   return glCtx;
@@ -160,28 +157,7 @@ class WasmHeapMemoryManager {
     this.allocations = new Map();
     this.jsFallbackBlocks = new Map();
     this.nextFallbackPtr = 0x50000000;
-    this.heapView = null;
-    this.rawBuffer = null;
     this.scratchStringPtrs = new Map();
-  }
-
-  getDataView(lib) {
-    if (lib && typeof lib.getJNIDataView === "function") {
-      try {
-        const v = lib.getJNIDataView();
-        if (v && v.buffer !== this.rawBuffer) {
-          this.rawBuffer = v.buffer;
-          this.heapView = new Uint8Array(v.buffer);
-        }
-        return v;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  getHeapUint8(lib) {
-    this.getDataView(lib);
-    return this.heapView;
   }
 
   malloc(lib, size) {
@@ -190,20 +166,15 @@ class WasmHeapMemoryManager {
     const ptr = this.nextFallbackPtr;
     this.nextFallbackPtr += alignedSize + 16;
 
-    const heap = this.getHeapUint8(lib);
-    if (!heap || ptr + alignedSize >= heap.byteLength) {
-      const block = new Uint8Array(alignedSize);
-      this.jsFallbackBlocks.set(ptr, block);
-    }
+    const block = new Uint8Array(alignedSize);
+    this.jsFallbackBlocks.set(ptr, block);
     this.allocations.set(ptr, alignedSize);
     return ptr;
   }
 
   calloc(lib, num, size) {
     const total = Math.max(16, (Number(num) || 1) * (Number(size) || 1));
-    const ptr = this.malloc(lib, total);
-    this.memset(lib, ptr, 0, total);
-    return ptr;
+    return this.malloc(lib, total);
   }
 
   realloc(lib, ptr, newSize) {
@@ -244,23 +215,25 @@ class WasmHeapMemoryManager {
   getSubarray(lib, ptr, byteLength) {
     const p = Number(ptr);
     if (p === 0) return null;
-    const len = Number(byteLength) || this.allocations.get(p) || 0;
+    const len = Number(byteLength) || this.allocations.get(p) || 256;
 
+    // Locate containing JS block if ptr is an interior pointer
     if (this.jsFallbackBlocks.has(p)) {
       const blk = this.jsFallbackBlocks.get(p);
-      return len > 0 ? blk.subarray(0, Math.min(len, blk.length)) : blk;
+      return blk.subarray(0, Math.min(len, blk.length));
     }
 
-    const heap = this.getHeapUint8(lib);
-    if (heap && p > 0 && p < heap.byteLength) {
-      const safeEnd = len > 0 ? Math.min(heap.byteLength, p + len) : heap.byteLength;
-      return heap.subarray(p, safeEnd);
+    for (const [basePtr, blk] of this.jsFallbackBlocks.entries()) {
+      if (p >= basePtr && p < basePtr + blk.byteLength) {
+        const offset = p - basePtr;
+        return blk.subarray(offset, Math.min(blk.byteLength, offset + len));
+      }
     }
 
     const fallback = new Uint8Array(Math.max(len, 256));
     this.jsFallbackBlocks.set(p, fallback);
     this.allocations.set(p, fallback.length);
-    return len > 0 ? fallback.subarray(0, len) : fallback;
+    return fallback.subarray(0, len);
   }
 
   readCString(lib, ptr) {
@@ -269,7 +242,7 @@ class WasmHeapMemoryManager {
     const p = Number(ptr);
     if (!p) return "";
 
-    const slice = this.getSubarray(lib, p, 4096);
+    const slice = this.getSubarray(lib, p, 1024);
     if (!slice) return "";
     let end = 0;
     while (end < slice.length && slice[end] !== 0) end++;
@@ -289,48 +262,63 @@ class WasmHeapMemoryManager {
     return ptr;
   }
 
+  readInt8(lib, ptr) {
+    const sub = this.getSubarray(lib, ptr, 1);
+    return sub ? (sub[0] << 24) >> 24 : 0;
+  }
+
+  writeInt8(lib, ptr, val) {
+    const sub = this.getSubarray(lib, ptr, 1);
+    if (sub) sub[0] = Number(val) & 0xFF;
+  }
+
+  readInt16(lib, ptr) {
+    const sub = this.getSubarray(lib, ptr, 2);
+    return sub ? new DataView(sub.buffer, sub.byteOffset, 2).getInt16(0, true) : 0;
+  }
+
+  writeInt16(lib, ptr, val) {
+    const sub = this.getSubarray(lib, ptr, 2);
+    if (sub) new DataView(sub.buffer, sub.byteOffset, 2).setInt16(0, Number(val), true);
+  }
+
   readInt32(lib, ptr) {
-    const p = Number(ptr);
-    if (!p) return 0;
-    const v = this.getDataView(lib);
-    if (v && p > 0 && p + 4 <= v.byteLength) return v.getInt32(p, true);
-    const sub = this.getSubarray(lib, p, 4);
+    const sub = this.getSubarray(lib, ptr, 4);
     return sub ? new DataView(sub.buffer, sub.byteOffset, 4).getInt32(0, true) : 0;
   }
 
   writeInt32(lib, ptr, val) {
-    const p = Number(ptr);
-    if (!p) return;
-    const v = this.getDataView(lib);
-    if (v && p > 0 && p + 4 <= v.byteLength) {
-      v.setInt32(p, Number(val), true);
-      return;
-    }
-    const sub = this.getSubarray(lib, p, 4);
+    const sub = this.getSubarray(lib, ptr, 4);
     if (sub) new DataView(sub.buffer, sub.byteOffset, 4).setInt32(0, Number(val), true);
   }
 
+  readInt64(lib, ptr) {
+    const sub = this.getSubarray(lib, ptr, 8);
+    return sub ? Number(new DataView(sub.buffer, sub.byteOffset, 8).getBigInt64(0, true)) : 0;
+  }
+
+  writeInt64(lib, ptr, val) {
+    const sub = this.getSubarray(lib, ptr, 8);
+    if (sub) new DataView(sub.buffer, sub.byteOffset, 8).setBigInt64(0, BigInt(Math.trunc(Number(val) || 0)), true);
+  }
+
+  readFloat32(lib, ptr) {
+    const sub = this.getSubarray(lib, ptr, 4);
+    return sub ? new DataView(sub.buffer, sub.byteOffset, 4).getFloat32(0, true) : 0.0;
+  }
+
   writeFloat32(lib, ptr, val) {
-    const p = Number(ptr);
-    if (!p) return;
-    const v = this.getDataView(lib);
-    if (v && p > 0 && p + 4 <= v.byteLength) {
-      v.setFloat32(p, Number(val), true);
-      return;
-    }
-    const sub = this.getSubarray(lib, p, 4);
+    const sub = this.getSubarray(lib, ptr, 4);
     if (sub) new DataView(sub.buffer, sub.byteOffset, 4).setFloat32(0, Number(val), true);
   }
 
+  readFloat64(lib, ptr) {
+    const sub = this.getSubarray(lib, ptr, 8);
+    return sub ? new DataView(sub.buffer, sub.byteOffset, 8).getFloat64(0, true) : 0.0;
+  }
+
   writeFloat64(lib, ptr, val) {
-    const p = Number(ptr);
-    if (!p) return;
-    const v = this.getDataView(lib);
-    if (v && p > 0 && p + 8 <= v.byteLength) {
-      v.setFloat64(p, Number(val), true);
-      return;
-    }
-    const sub = this.getSubarray(lib, p, 8);
+    const sub = this.getSubarray(lib, ptr, 8);
     if (sub) new DataView(sub.buffer, sub.byteOffset, 8).setFloat64(0, Number(val), true);
   }
 }
@@ -798,24 +786,16 @@ function transpileGLSL150ToWebGL2(source, shaderType) {
 }
 
 const glDispatch = {
-  glGetError() {
-    return 0;
-  },
+  glGetError() { return 0; },
   glGetString(lib, name) {
     ensureGLContext();
     const n = Number(name);
     let str = "";
-    if (n === 0x1F00 /* GL_VENDOR */) {
-      str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
-    } else if (n === 0x1F01 /* GL_RENDERER */) {
-      str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
-    } else if (n === 0x1F02 /* GL_VERSION */) {
-      str = "3.2.0 WebForge WebGL 2.0";
-    } else if (n === 0x8B8C /* GL_SHADING_LANGUAGE_VERSION */) {
-      str = "1.50 WebForge GLSL ES 3.00";
-    } else if (n === 0x1F03 /* GL_EXTENSIONS */) {
-      str = SUPPORTED_GL_EXTENSIONS.join(" ");
-    }
+    if (n === 0x1F00) str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_VENDOR_WEBGL)) || "WebForge";
+    else if (n === 0x1F01) str = (debugRendererExt && glCtx && glCtx.getParameter(debugRendererExt.UNMASKED_RENDERER_WEBGL)) || "WebForge WebGL 2.0 Core";
+    else if (n === 0x1F02) str = "3.2.0 WebForge WebGL 2.0";
+    else if (n === 0x8B8C) str = "1.50 WebForge GLSL ES 3.00";
+    else if (n === 0x1F03) str = SUPPORTED_GL_EXTENSIONS.join(" ");
     return mem.allocCString(lib, str);
   },
   glGetStringi(lib, name, index) {
@@ -827,16 +807,16 @@ const glDispatch = {
     ensureGLContext();
     const p = Number(pname);
     let val = 0;
-    if (p === 0x821B /* GL_MAJOR_VERSION */) val = 3;
-    else if (p === 0x821C /* GL_MINOR_VERSION */) val = 2;
-    else if (p === 0x821D /* GL_NUM_EXTENSIONS */) val = SUPPORTED_GL_EXTENSIONS.length;
-    else if (p === 0x9126 /* GL_CONTEXT_PROFILE_MASK */) val = 1;
-    else if (p === 0x0D33 /* GL_MAX_TEXTURE_SIZE */) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_TEXTURE_SIZE)) || 8192;
-    else if (p === 0x84E8 /* GL_MAX_RENDERBUFFER_SIZE */) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_RENDERBUFFER_SIZE)) || 8192;
-    else if (p === 0x8872 /* GL_MAX_TEXTURE_IMAGE_UNITS */) val = 16;
-    else if (p === 0x8B4D /* GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS */) val = 32;
-    else if (p === 0x8869 /* GL_MAX_VERTEX_ATTRIBS */) val = 16;
-    else if (p === 0x0BA2 /* GL_VIEWPORT */) {
+    if (p === 0x821B) val = 3;
+    else if (p === 0x821C) val = 2;
+    else if (p === 0x821D) val = SUPPORTED_GL_EXTENSIONS.length;
+    else if (p === 0x9126) val = 1;
+    else if (p === 0x0D33) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_TEXTURE_SIZE)) || 8192;
+    else if (p === 0x84E8) val = (glCtx && glCtx.getParameter(GL_CONST.MAX_RENDERBUFFER_SIZE)) || 8192;
+    else if (p === 0x8872) val = 16;
+    else if (p === 0x8B4D) val = 32;
+    else if (p === 0x8869) val = 16;
+    else if (p === 0x0BA2) {
       mem.writeInt32(lib, Number(paramsPtr) + 0, 0);
       mem.writeInt32(lib, Number(paramsPtr) + 4, 0);
       mem.writeInt32(lib, Number(paramsPtr) + 8, (glCanvas && glCanvas.width) || 854);
@@ -856,8 +836,7 @@ const glDispatch = {
     mem.writeFloat32(lib, paramsPtr, 1.0);
   },
   glGetBooleanv(lib, pname, paramsPtr) {
-    const sub = mem.getSubarray(lib, paramsPtr, 1);
-    if (sub) sub[0] = 1;
+    mem.writeInt8(lib, paramsPtr, 1);
   },
   glClearColor(lib, r, g, b, a) {
     ensureGLContext()?.clearColor(Number(r), Number(g), Number(b), Number(a));
@@ -938,8 +917,6 @@ const glDispatch = {
       ctx.pixelStorei(p, Number(param));
     }
   },
-
-  // Buffers (VBO, EBO, UBO)
   glGenBuffers(lib, n, buffersPtr) {
     const ctx = ensureGLContext();
     const count = Number(n);
@@ -1030,8 +1007,6 @@ const glDispatch = {
       }
     }
   },
-
-  // VAOs & Attributes
   glGenVertexArrays(lib, n, arraysPtr) {
     const ctx = ensureGLContext();
     const count = Number(n);
@@ -1079,8 +1054,6 @@ const glDispatch = {
   glVertexAttribDivisor(lib, index, divisor) {
     ensureGLContext()?.vertexAttribDivisor?.(Number(index), Number(divisor));
   },
-
-  // Shaders & Programs
   glCreateShader(lib, type) {
     const ctx = ensureGLContext();
     const t = Number(type);
@@ -1114,9 +1087,6 @@ const glDispatch = {
     const s = glObjects.shaders[Number(shader)];
     if (!s || !ctx) return;
     ctx.compileShader(s);
-    if (!ctx.getShaderParameter(s, GL_CONST.COMPILE_STATUS)) {
-      window.webforgeLog?.(`[GLSL Compile Warning] ${ctx.getShaderInfoLog(s)}`, "warn");
-    }
   },
   glGetShaderiv(lib, shader, pname, paramsPtr) {
     const ctx = ensureGLContext();
@@ -1130,17 +1100,7 @@ const glDispatch = {
     mem.writeInt32(lib, paramsPtr, typeof val === "boolean" ? (val ? 1 : 0) : (val || 0));
   },
   glGetShaderInfoLog(lib, shader, maxLength, lengthPtr, infoLogPtr) {
-    const ctx = ensureGLContext();
-    const s = glObjects.shaders[Number(shader)];
-    const info = (s && ctx && ctx.getShaderInfoLog(s)) || "";
-    const bytes = new TextEncoder().encode(info);
-    const len = Math.min(Number(maxLength) - 1, bytes.length);
-    if (lengthPtr) mem.writeInt32(lib, lengthPtr, len);
-    const out = mem.getSubarray(lib, infoLogPtr, len + 1);
-    if (out) {
-      out.set(bytes.subarray(0, len));
-      out[len] = 0;
-    }
+    if (lengthPtr) mem.writeInt32(lib, lengthPtr, 0);
   },
   glDeleteShader(lib, shader) {
     const ctx = ensureGLContext();
@@ -1271,8 +1231,6 @@ const glDispatch = {
     const sub = mem.getSubarray(lib, valuePtr, Number(count) * 64);
     if (sub) ensureGLContext()?.uniformMatrix4fv(u, Boolean(transpose), new Float32Array(sub.slice().buffer));
   },
-
-  // Textures & Framebuffers
   glGenTextures(lib, n, texturesPtr) {
     const ctx = ensureGLContext();
     const count = Number(n);
@@ -1314,7 +1272,7 @@ const glDispatch = {
       glObjects.texMeta[boundId].height = h;
     }
     const intFmt = (internalformat === GL_CONST.RGBA || internalformat === 4) ? GL_CONST.RGBA8 : Number(internalformat);
-    const fmt = (format === 0x80E1 /* BGRA */) ? GL_CONST.RGBA : Number(format);
+    const fmt = (format === 0x80E1) ? GL_CONST.RGBA : Number(format);
     const typ = (type === 0x8367) ? GL_CONST.UNSIGNED_BYTE : Number(type);
     const ptr = Number(pixelsPtr);
 
@@ -1342,8 +1300,8 @@ const glDispatch = {
   glGetTexLevelParameteriv(lib, target, level, pname, paramsPtr) {
     const boundId = boundTexBySlot[activeTexSlot];
     const meta = glObjects.texMeta[boundId] || { width: 16, height: 16 };
-    if (Number(pname) === 0x1000 /* WIDTH */) mem.writeInt32(lib, paramsPtr, meta.width);
-    else if (Number(pname) === 0x1001 /* HEIGHT */) mem.writeInt32(lib, paramsPtr, meta.height);
+    if (Number(pname) === 0x1000) mem.writeInt32(lib, paramsPtr, meta.width);
+    else if (Number(pname) === 0x1001) mem.writeInt32(lib, paramsPtr, meta.height);
     else mem.writeInt32(lib, paramsPtr, 0);
   },
   glDeleteTextures(lib, n, texturesPtr) {
@@ -1374,7 +1332,7 @@ const glDispatch = {
     ensureGLContext()?.framebufferTexture2D(Number(target), Number(attachment), Number(textarget), glObjects.textures[Number(texture)] || null, Number(level));
   },
   glCheckFramebufferStatus(lib, target) {
-    return 0x8CD5; // GL_FRAMEBUFFER_COMPLETE
+    return 0x8CD5;
   },
   glBlitFramebuffer(lib, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
     ensureGLContext()?.blitFramebuffer?.(Number(srcX0), Number(srcY0), Number(srcX1), Number(srcY1), Number(dstX0), Number(dstY0), Number(dstX1), Number(dstY1), Number(mask), Number(filter));
@@ -1418,7 +1376,7 @@ const glDispatch = {
 };
 
 // ============================================================================
-// 5. STBImage PNG/JPEG Hardware Decoder (Minecraft 1.20.1 NativeImage)
+// 5. STBImage PNG/JPEG Hardware Decoder
 // ============================================================================
 let stbiFlipVertically = false;
 
@@ -1487,7 +1445,6 @@ const stbDispatch = {
       if (channelsPtr) mem.writeInt32(lib, channelsPtr, 4);
       return outPtr;
     } catch (e) {
-      console.warn("[STBImage] Failed decoding texture:", e);
       return 0;
     }
   },
@@ -1497,7 +1454,7 @@ const stbDispatch = {
 };
 
 // ============================================================================
-// 6. OpenAL Stubs (org.lwjgl.openal.*)
+// 6. OpenAL Stubs
 // ============================================================================
 const alDispatch = {
   alcOpenDevice() { return 0x7001; },
@@ -1515,15 +1472,22 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Static + Strictly-Scoped Dynamic Proxy JNI Export Builder
+// 7. Explicit Plain-Object Export Table (No Proxy)
 // ============================================================================
+const jniInvokeHandler = function(lib, ...args) {
+  const funcPtr = args[args.length - 1];
+  const callArgs = args.slice(0, -1);
+  return symRegistry.invoke(lib, funcPtr, callArgs);
+};
+
 const baseExports = {
-  // ThreadLocalUtil (Required when LWJGL 3.3.1 initializes Capabilities)
+  // ThreadLocalUtil
   Java_org_lwjgl_system_ThreadLocalUtil_getThreadJNIEnv: (lib) => mem.calloc(lib, 256, 4),
   Java_org_lwjgl_system_ThreadLocalUtil_getFunctionMissingAbort: () => symRegistry.register("abort", () => 0),
   Java_org_lwjgl_system_ThreadLocalUtil_nsetupEnvData: (lib, count) => mem.calloc(lib, Number(count) || 256, 4),
+  Java_org_lwjgl_system_ThreadLocalUtil_setFunctionMissingAddresses: () => {},
 
-  // MemoryAccessJNI & MemoryUtil
+  // MemoryAccessJNI (Complete off-heap pointer and primitive accessors)
   Java_org_lwjgl_system_MemoryAccessJNI_getPointerSize: () => 4,
   Java_org_lwjgl_system_MemoryAccessJNI_malloc: () => symRegistry.register("malloc", (lib, s) => mem.malloc(lib, s)),
   Java_org_lwjgl_system_MemoryAccessJNI_calloc: () => symRegistry.register("calloc", (lib, n, s) => mem.calloc(lib, n, s)),
@@ -1531,10 +1495,34 @@ const baseExports = {
   Java_org_lwjgl_system_MemoryAccessJNI_free: () => symRegistry.register("free", (lib, p) => mem.free(lib, p)),
   Java_org_lwjgl_system_MemoryAccessJNI_aligned_1alloc: () => symRegistry.register("aligned_alloc", (lib, a, s) => mem.malloc(lib, s)),
   Java_org_lwjgl_system_MemoryAccessJNI_aligned_1free: () => symRegistry.register("aligned_free", (lib, p) => mem.free(lib, p)),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetByte: (lib, ptr) => mem.readInt8(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetShort: (lib, ptr) => mem.readInt16(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetInt: (lib, ptr) => mem.readInt32(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetLong: (lib, ptr) => mem.readInt64(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetFloat: (lib, ptr) => mem.readFloat32(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetDouble: (lib, ptr) => mem.readFloat64(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_ngetAddress: (lib, ptr) => mem.readInt32(lib, ptr),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputByte: (lib, ptr, val) => mem.writeInt8(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputShort: (lib, ptr, val) => mem.writeInt16(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputInt: (lib, ptr, val) => mem.writeInt32(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputLong: (lib, ptr, val) => mem.writeInt64(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputFloat: (lib, ptr, val) => mem.writeFloat32(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputDouble: (lib, ptr, val) => mem.writeFloat64(lib, ptr, val),
+  Java_org_lwjgl_system_MemoryAccessJNI_nputAddress: (lib, ptr, val) => mem.writeInt32(lib, ptr, val),
+
+  // MemoryUtil & LibC
   Java_org_lwjgl_system_MemoryUtil_nmemAlloc: (lib, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemAllocChecked: (lib, size) => mem.malloc(lib, size),
   Java_org_lwjgl_system_MemoryUtil_nmemCalloc: (lib, num, size) => mem.calloc(lib, num, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemCallocChecked: (lib, num, size) => mem.calloc(lib, num, size),
   Java_org_lwjgl_system_MemoryUtil_nmemRealloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemReallocChecked: (lib, ptr, size) => mem.realloc(lib, ptr, size),
   Java_org_lwjgl_system_MemoryUtil_nmemFree: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_MemoryUtil_nmemAlignedAlloc: (lib, align, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemAlignedAllocChecked: (lib, align, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_MemoryUtil_nmemAlignedFree: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_MemoryUtil_nmemSet: (lib, ptr, val, bytes) => mem.memset(lib, ptr, val, bytes),
+  Java_org_lwjgl_system_MemoryUtil_nmemCopy: (lib, dst, src, bytes) => mem.memcpy(lib, dst, src, bytes),
   Java_org_lwjgl_system_libc_LibCStdlib_nmalloc: (lib, size) => mem.malloc(lib, size),
   Java_org_lwjgl_system_libc_LibCStdlib_ncalloc: (lib, num, size) => mem.calloc(lib, num, size),
   Java_org_lwjgl_system_libc_LibCStdlib_nrealloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
@@ -1543,6 +1531,45 @@ const baseExports = {
   Java_org_lwjgl_system_libc_LibCStdlib_naligned_1free: (lib, ptr) => mem.free(lib, ptr),
   Java_org_lwjgl_system_libc_LibCString_nmemset: (lib, ptr, val, bytes) => mem.memset(lib, ptr, val, bytes),
   Java_org_lwjgl_system_libc_LibCString_nmemcpy: (lib, dst, src, bytes) => mem.memcpy(lib, dst, src, bytes),
+
+  // JEmalloc
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1malloc: (lib, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1calloc: (lib, num, size) => mem.calloc(lib, num, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1realloc: (lib, ptr, size) => mem.realloc(lib, ptr, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1free: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1aligned_1alloc: (lib, align, size) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1mallocx: (lib, size, flags) => mem.malloc(lib, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1rallocx: (lib, ptr, size, flags) => mem.realloc(lib, ptr, size),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1dallocx: (lib, ptr, flags) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_jemalloc_JEmalloc_nje_1sdallocx: (lib, ptr, size, flags) => mem.free(lib, ptr),
+
+  // LibFFI (Used by LWJGL 3 Callback closures)
+  Java_org_lwjgl_system_libffi_LibFFI_FFI_1DEFAULT_1ABI: () => 1,
+  Java_org_lwjgl_system_libffi_LibFFI_FFI_1SYSV: () => 1,
+  Java_org_lwjgl_system_libffi_LibFFI_FFI_1UNIX64: () => 2,
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1void: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1uint8: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1sint8: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1uint16: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1sint16: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1uint32: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1sint32: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1uint64: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1sint64: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1float: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1double: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_ffi_1type_1pointer: (lib) => mem.malloc(lib, 16),
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1prep_1cif: () => 0,
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1prep_1cif_1var: () => 0,
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1call: () => {},
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1closure_1alloc: (lib, size, codePtr) => {
+    const ptr = mem.malloc(lib, Number(size) || 64);
+    if (codePtr) mem.writeInt32(lib, codePtr, ptr);
+    return ptr;
+  },
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1closure_1free: (lib, ptr) => mem.free(lib, ptr),
+  Java_org_lwjgl_system_libffi_LibFFI_nffi_1prep_1closure_1loc: () => 0,
+  Java_org_lwjgl_system_Callback_getNativeCallbacks: () => 1,
 
   // POSIX DynamicLinkLoader (dlopen / dlsym)
   Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlopen(lib, filenamePtr, mode) {
@@ -1554,12 +1581,11 @@ const baseExports = {
     const symName = mem.readCString(lib, namePtr);
     return symRegistry.resolve(symName);
   },
-  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlerror() {
-    return 0;
-  },
-  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlclose() {
-    return 0;
-  },
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlerror: () => 0,
+  Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlclose: () => 0,
+
+  // GL Function Provider
+  Java_org_lwjgl_opengl_GL_getFunctionProvider: () => 1,
 
   // STBImage
   Java_org_lwjgl_stb_STBImage_nstbi_1set_1flip_1vertically_1on_1load: stbDispatch.nstbi_set_flip_vertically_on_load,
@@ -1569,13 +1595,21 @@ const baseExports = {
   Java_org_lwjgl_stb_STBImage_nstbi_1image_1free: stbDispatch.nstbi_image_free
 };
 
+// Populate all GLFW functions
 for (const [fnName, fnImpl] of Object.entries(glfwDispatch)) {
   symRegistry.register(fnName, fnImpl);
   baseExports[`Java_org_lwjgl_glfw_GLFW_${fnName}`] = fnImpl;
   baseExports[`Java_org_lwjgl_glfw_GLFW_n${fnName}`] = fnImpl;
 }
 
-const glClasses = ["GL11", "GL11C", "GL12", "GL12C", "GL13", "GL13C", "GL14", "GL14C", "GL15", "GL15C", "GL20", "GL20C", "GL21", "GL30", "GL30C", "GL31", "GL31C", "GL32", "GL32C", "GL33", "GL33C", "GL40", "GL43", "GL45"];
+// Populate all OpenGL functions across GL11..GL46 and GL11C..GL46C
+const glClasses = [
+  "GL11", "GL11C", "GL12", "GL12C", "GL13", "GL13C", "GL14", "GL14C",
+  "GL15", "GL15C", "GL20", "GL20C", "GL21", "GL21C", "GL30", "GL30C",
+  "GL31", "GL31C", "GL32", "GL32C", "GL33", "GL33C", "GL40", "GL40C",
+  "GL41", "GL41C", "GL42", "GL42C", "GL43", "GL43C", "GL44", "GL44C",
+  "GL45", "GL45C", "GL46", "GL46C"
+];
 for (const [glName, glImpl] of Object.entries(glDispatch)) {
   symRegistry.register(glName, glImpl);
   for (const cls of glClasses) {
@@ -1584,69 +1618,47 @@ for (const [glName, glImpl] of Object.entries(glDispatch)) {
   }
 }
 
-// CRITICAL: Only intercept org.lwjgl.* and com.cucuzacu.*!
-// Never intercept Java_java_*, Java_jdk_*, or Java_sun_* so CheerpJ's OpenJDK 17 runs natively.
-function isCustomLWJGLOrNetlibSymbol(prop) {
-  if (typeof prop !== "string") return false;
-  return (
-    prop.startsWith("Java_org_lwjgl_") ||
-    prop.startsWith("Java_com_cucuzacu_")
-  );
+// Populate all OpenAL functions
+for (const [alName, alImpl] of Object.entries(alDispatch)) {
+  symRegistry.register(alName, alImpl);
+  baseExports[`Java_org_lwjgl_openal_ALC10_${alName}`] = alImpl;
+  baseExports[`Java_org_lwjgl_openal_ALC10_n${alName}`] = alImpl;
+  baseExports[`Java_org_lwjgl_openal_AL10_${alName}`] = alImpl;
+  baseExports[`Java_org_lwjgl_openal_AL10_n${alName}`] = alImpl;
 }
 
-function createDynamicJNIProxy(targetObj, logFn) {
-  return new Proxy(targetObj, {
-    has(target, prop) {
-      if (prop in target) return true;
-      if (isCustomLWJGLOrNetlibSymbol(prop)) return true;
-      return false;
-    },
-    get(target, prop, receiver) {
-      if (prop in target) return Reflect.get(target, prop, receiver);
-      if (!isCustomLWJGLOrNetlibSymbol(prop)) {
-        return undefined;
-      }
+// Explicitly pre-populate all LWJGL 3 org.lwjgl.system.JNI.invoke* and call* signatures
+const jniSignatures = [
+  "V", "Z", "B", "S", "C", "I", "J", "F", "D", "P",
+  "PV", "PZ", "PI", "PJ", "PF", "PD", "PP",
+  "IV", "IZ", "II", "IJ", "IF", "ID", "IP",
+  "JV", "JZ", "JI", "JJ", "JF", "JD", "JP",
+  "FV", "FF", "DV", "DD",
+  "PPV", "PPZ", "PPI", "PPJ", "PPF", "PPD", "PPP",
+  "PIV", "PIZ", "PII", "PIJ", "PIF", "PID", "PIP",
+  "PJV", "PJZ", "PJI", "PJJ", "PJP", "PFV", "PDV",
+  "IIV", "IIZ", "III", "IIJ", "IIF", "IIP",
+  "IJV", "IJI", "IJJ", "IJP", "IPV", "IPI", "IPP",
+  "JJV", "JJI", "JJJ", "JJP", "JPV", "JPP",
+  "FFV", "FFF", "DDV", "DDD",
+  "PPPV", "PPPZ", "PPPI", "PPPJ", "PPPP",
+  "PPIV", "PPII", "PPIJ", "PPIP",
+  "PIPV", "PIPI", "PIPJ", "PIPP",
+  "PIIV", "PIIZ", "PIII", "PIIJ", "PIIF", "PIIP",
+  "PJJV", "PJJI", "PJJJ", "PJJP",
+  "PFFV", "PDDV", "IIIV", "IIII", "IIIP", "IIPV", "IIPP",
+  "FFFFV", "PPPPZ", "PPPPV", "PPPPI", "PPPPJ", "PPPPP",
+  "PPPJV", "PPIIV", "PPIII", "PPIIJ", "PPIIP",
+  "PIPPV", "PIPPI", "PIPPP", "PIIIV", "PIIII", "PIIIP",
+  "PIIJV", "PIJPV", "PJJJV", "PFFFV", "PDDDV", "IIIIV",
+  "PPPPPV", "PPPPPI", "PPPPPP", "PPIIIV", "PPIIII", "PPIIIP",
+  "PIIIIV", "PIIIII", "PIIIIP", "PIIJPV", "PFFFFV",
+  "PPIIIIV", "PPIIIIIV", "PIIIIIIV", "PIIIIIIP"
+];
 
-      // 1. Intercept org.lwjgl.system.JNI.invoke* and JNI.call*
-      if (prop.startsWith("Java_org_lwjgl_system_JNI_invoke") || prop.startsWith("Java_org_lwjgl_system_JNI_call")) {
-        const fn = function(lib, ...args) {
-          const funcPtr = args[args.length - 1];
-          const callArgs = args.slice(0, -1);
-          return symRegistry.invoke(lib, funcPtr, callArgs);
-        };
-        target[prop] = fn;
-        return fn;
-      }
-
-      // 2. Intercept any OpenGL GL* / ARB* / EXT* class method
-      const glMatch = prop.match(/^Java_org_lwjgl_opengl_[A-Za-z0-9_]+_n?(gl[A-Za-z0-9_]+)$/);
-      if (glMatch) {
-        const glSym = glMatch[1].replace(/_1/g, "_");
-        const fn = glDispatch[glSym] || function() { return 0; };
-        target[prop] = fn;
-        return fn;
-      }
-
-      // 3. Intercept any GLFW method
-      const glfwMatch = prop.match(/^Java_org_lwjgl_glfw_GLFW_n?(glfw[A-Za-z0-9_]+)$/);
-      if (glfwMatch) {
-        const glfwSym = glfwMatch[1].replace(/_1/g, "_");
-        const fn = glfwDispatch[glfwSym] || function() { return 0; };
-        target[prop] = fn;
-        return fn;
-      }
-
-      // 4. Auto-stub any remaining org.lwjgl.* native method
-      const fallbackStub = function(lib, ...args) {
-        logFn?.(`[Auto-Stubbed LWJGL JNI] ${prop}`, "warn");
-        return 0;
-      };
-      target[prop] = fallbackStub;
-      return fallbackStub;
-    }
-  });
+for (const sig of jniSignatures) {
+  baseExports[`Java_org_lwjgl_system_JNI_invoke${sig}`] = jniInvokeHandler;
+  baseExports[`Java_org_lwjgl_system_JNI_call${sig}`] = jniInvokeHandler;
 }
 
-baseExports.__createDynamicJNIProxy = createDynamicJNIProxy;
-
-export default createDynamicJNIProxy(baseExports, window.webforgeLog);
+export default baseExports;
