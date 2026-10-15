@@ -1,7 +1,7 @@
 // ============================================================================
 // WebForge Unified LWJGL 3.3.1 (GLFW, OpenGL 3.2+ Core, STBImage, OpenAL,
 // DynamicLinkLoader dlsym, ThreadLocalUtil, MemoryUtil / LibC / JEmalloc)
-// With Lazy WebGL 2 Context Binding
+// Strictly Scoped to org.lwjgl.* & com.cucuzacu.* so OpenJDK 17 Boots Cleanly
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -119,7 +119,6 @@ function ensureGLContext() {
   glCanvas = resolveActiveCanvas();
   attachInputListeners(glCanvas);
 
-  // Try progressively more permissive context attribute sets
   const optionProfiles = [
     { alpha: false, depth: true, stencil: true, antialias: false, powerPreference: "high-performance", preserveDrawingBuffer: false },
     { alpha: false, depth: true, stencil: true, antialias: false },
@@ -134,7 +133,6 @@ function ensureGLContext() {
     } catch (_) {}
   }
 
-  // Fallback to WebGL 1 if WebGL 2 is restricted on the current canvas
   if (!glCtx) {
     try {
       glCtx = glCanvas.getContext("webgl") || glCanvas.getContext("experimental-webgl");
@@ -1517,7 +1515,7 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Static + Dynamic Proxy JNI Export Builder
+// 7. Static + Strictly-Scoped Dynamic Proxy JNI Export Builder
 // ============================================================================
 const baseExports = {
   // ThreadLocalUtil (Required when LWJGL 3.3.1 initializes Capabilities)
@@ -1545,7 +1543,6 @@ const baseExports = {
   Java_org_lwjgl_system_libc_LibCStdlib_naligned_1free: (lib, ptr) => mem.free(lib, ptr),
   Java_org_lwjgl_system_libc_LibCString_nmemset: (lib, ptr, val, bytes) => mem.memset(lib, ptr, val, bytes),
   Java_org_lwjgl_system_libc_LibCString_nmemcpy: (lib, dst, src, bytes) => mem.memcpy(lib, dst, src, bytes),
-  Java_org_lwjgl_system_JNI_getNativeLibraryVersion: () => "3.3.1",
 
   // POSIX DynamicLinkLoader (dlopen / dlsym)
   Java_org_lwjgl_system_linux_DynamicLinkLoader_ndlopen(lib, filenamePtr, mode) {
@@ -1587,17 +1584,27 @@ for (const [glName, glImpl] of Object.entries(glDispatch)) {
   }
 }
 
+// CRITICAL: Only intercept org.lwjgl.* and com.cucuzacu.*!
+// Never intercept Java_java_*, Java_jdk_*, or Java_sun_* so CheerpJ's OpenJDK 17 runs natively.
+function isCustomLWJGLOrNetlibSymbol(prop) {
+  if (typeof prop !== "string") return false;
+  return (
+    prop.startsWith("Java_org_lwjgl_") ||
+    prop.startsWith("Java_com_cucuzacu_")
+  );
+}
+
 function createDynamicJNIProxy(targetObj, logFn) {
   return new Proxy(targetObj, {
     has(target, prop) {
       if (prop in target) return true;
-      if (typeof prop === "string" && prop.startsWith("Java_")) return true;
+      if (isCustomLWJGLOrNetlibSymbol(prop)) return true;
       return false;
     },
     get(target, prop, receiver) {
       if (prop in target) return Reflect.get(target, prop, receiver);
-      if (typeof prop !== "string" || !prop.startsWith("Java_")) {
-        return Reflect.get(target, prop, receiver);
+      if (!isCustomLWJGLOrNetlibSymbol(prop)) {
+        return undefined;
       }
 
       // 1. Intercept org.lwjgl.system.JNI.invoke* and JNI.call*
@@ -1629,9 +1636,9 @@ function createDynamicJNIProxy(targetObj, logFn) {
         return fn;
       }
 
-      // 4. Auto-stub any other native method so UnsatisfiedLinkError never halts the JVM
+      // 4. Auto-stub any remaining org.lwjgl.* native method
       const fallbackStub = function(lib, ...args) {
-        logFn?.(`[Auto-Stubbed JNI] ${prop}`, "warn");
+        logFn?.(`[Auto-Stubbed LWJGL JNI] ${prop}`, "warn");
         return 0;
       };
       target[prop] = fallbackStub;
