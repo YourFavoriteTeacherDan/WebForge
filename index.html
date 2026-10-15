@@ -181,9 +181,9 @@
     </div>
 
     <script type="module">
-      import MinecraftClient from "./minecraft-web.js?v=1201_v3";
-      import lwjglNatives from "./natives/lwjgl.js?v=1201_v3";
-      import netlibNatives from "./natives/netlib.js?v=1201_v3";
+      import MinecraftClient from "./minecraft-web.js?v=1201_v4";
+      import lwjglNatives from "./natives/lwjgl.js?v=1201_v4";
+      import netlibNatives from "./natives/netlib.js?v=1201_v4";
 
       const consolePane = document.getElementById("console-pane");
       const statusBanner = document.getElementById("status-banner");
@@ -234,7 +234,7 @@
       }
 
       try {
-        log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table (v3)...", "glfw");
+        log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table (v4)...", "glfw");
         await cheerpjInit({
           version: 17,
           status: "none",
@@ -242,26 +242,45 @@
           natives: combinedNatives,
           javaProperties: [
             `java.library.path=${nativesPath}`,
+            "log4j.configurationFile=/str/log4j2.xml",
+            "log4j2.configurationFile=/str/log4j2.xml",
+            "log4j.skipJansi=true",
+            "log4j2.disable.jmx=true",
             "org.lwjgl.util.NoChecks=true",
             "org.lwjgl.util.Debug=true",
             "org.lwjgl.util.DebugLoader=true",
             "org.lwjgl.system.allocator=system",
             "org.lwjgl.glfw.checkThread0=false",
             "java.awt.headless=false",
-            "log4j.skipJansi=true",
-            "log4j2.disable.jmx=true",
             "fml.earlyprogresswindow=false",
             "fml.ignoreInvalidMinecraftCertificates=true",
             "fml.ignorePatchDiscrepancies=true"
           ]
         });
 
+        // Write safe Log4j2 config into /str/log4j2.xml that uses %ex (ThrowablePatternConverter)
+        // instead of %xEx / %tEx (which crash calling SecurityManager.getClassContext)
+        const safeLog4jXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="OFF">
+  <Appenders>
+    <Console name="SysOut" target="SYSTEM_OUT">
+      <PatternLayout alwaysWriteExceptions="false" pattern="[%d{HH:mm:ss}] [%t/%level] [%logger{1}]: %msg%n%ex"/>
+    </Console>
+  </Appenders>
+  <Loggers>
+    <Root level="info">
+      <AppenderRef ref="SysOut"/>
+    </Root>
+  </Loggers>
+</Configuration>`;
+        cheerpOSAddStringFile("/str/log4j2.xml", new TextEncoder().encode(safeLog4jXml));
+
         MinecraftClient.register();
         await refreshDBStats();
 
         statusBanner.textContent = "JVM 17 Ready.";
         statusBanner.style.color = "#00e676";
-        log("CheerpJ 17 & LWJGL 3 Native Bridge (v3) Ready.", "glfw");
+        log("CheerpJ 17, /str/log4j2.xml, & LWJGL 3 Bridge (v4) Ready.", "glfw");
         startBtn.disabled = false;
       } catch (err) {
         log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
