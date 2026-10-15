@@ -8,127 +8,45 @@
     <script src="https://cjrtnc.leaningtech.com/4.2/loader.js"></script>
     <style>
       * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        background: #070709;
-      }
+      body { margin: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #070709; }
       #top-bar {
-        padding: 10px 16px;
-        background: #121216;
-        border-bottom: 1px solid #27272a;
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 10px;
-        z-index: 20;
+        padding: 10px 16px; background: #121216; border-bottom: 1px solid #27272a;
+        display: flex; flex-wrap: wrap; align-items: center; gap: 10px; z-index: 20;
       }
-      .brand {
-        font-weight: 800;
-        font-size: 15px;
-        color: #00e676;
-        letter-spacing: 0.4px;
-        margin-right: 4px;
-      }
+      .brand { font-weight: 800; font-size: 15px; color: #00e676; letter-spacing: 0.4px; margin-right: 4px; }
       .control-group {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 12px;
-        background: #18181c;
-        padding: 5px 9px;
-        border-radius: 6px;
-        border: 1px solid #27272a;
+        display: flex; align-items: center; gap: 6px; font-size: 12px;
+        background: #18181c; padding: 5px 9px; border-radius: 6px; border: 1px solid #27272a;
       }
       input[type="text"], select {
-        background: #09090b;
-        border: 1px solid #3f3f46;
-        color: #f4f4f5;
-        padding: 4px 7px;
-        border-radius: 4px;
-        font-size: 12px;
+        background: #09090b; border: 1px solid #3f3f46; color: #f4f4f5;
+        padding: 4px 7px; border-radius: 4px; font-size: 12px;
       }
       .btn {
-        padding: 7px 13px;
-        background: #00e676;
-        color: #050505;
-        font-weight: 700;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 12px;
-        transition: all 0.15s ease;
+        padding: 7px 13px; background: #00e676; color: #050505; font-weight: 700;
+        border: none; border-radius: 5px; cursor: pointer; font-size: 12px;
       }
-      .btn:hover:not(:disabled) { background: #00c853; transform: translateY(-1px); }
+      .btn:hover:not(:disabled) { background: #00c853; }
       .btn:disabled { background: #27272a; color: #71717a; cursor: not-allowed; }
-      .btn-secondary {
-        background: #27272a;
-        color: #e4e4e7;
-        border: 1px solid #3f3f46;
-      }
-      .btn-secondary:hover:not(:disabled) { background: #3f3f46; }
+      .btn-secondary { background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46; }
       #db-stats {
-        font-family: monospace;
-        font-size: 11px;
-        color: #38bdf8;
-        background: rgba(56, 189, 248, 0.1);
-        padding: 5px 8px;
-        border-radius: 5px;
-        border: 1px solid rgba(56, 189, 248, 0.25);
+        font-family: monospace; font-size: 11px; color: #38bdf8;
+        background: rgba(56, 189, 248, 0.1); padding: 5px 8px; border-radius: 5px;
       }
-      #status-banner {
-        font-family: monospace;
-        font-size: 12px;
-        color: #a1a1aa;
-        margin-left: auto;
-      }
-      #progress-strip {
-        height: 4px;
-        width: 100%;
-        background: #18181b;
-        position: relative;
-        overflow: hidden;
-      }
-      #progress-fill {
-        height: 100%;
-        width: 0%;
-        background: linear-gradient(90deg, #00e676, #00b0ff);
-        transition: width 0.15s ease;
-      }
-      #main-split {
-        flex: 1;
-        display: flex;
-        overflow: hidden;
-      }
+      #status-banner { font-family: monospace; font-size: 12px; color: #a1a1aa; margin-left: auto; }
+      #progress-strip { height: 4px; width: 100%; background: #18181b; overflow: hidden; }
+      #progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #00e676, #00b0ff); transition: width 0.15s ease; }
+      #main-split { flex: 1; display: flex; overflow: hidden; }
       #console-pane {
-        flex: 1;
-        background: #050507;
-        color: #d4d4d8;
-        font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
-        font-size: 12px;
-        padding: 14px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        word-break: break-all;
-        border-right: 1px solid #1f1f23;
+        flex: 1; background: #050507; color: #d4d4d8; font-family: monospace;
+        font-size: 12px; padding: 14px; overflow-y: auto; white-space: pre-wrap;
+        word-break: break-all; border-right: 1px solid #1f1f23;
       }
-      #viewport-pane {
-        flex: 1.4;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        background: #000;
-        position: relative;
-      }
+      #viewport-pane { flex: 1.4; display: flex; align-items: center; justify-content: center; background: #000; position: relative; }
       .log-info { color: #86efac; }
       .log-warn { color: #fde047; }
-      .log-err { color: #f87171; font-weight: bold; background: rgba(248, 113, 113, 0.08); padding: 2px 4px; }
+      .log-err { color: #f87171; font-weight: bold; }
       .log-glfw { color: #38bdf8; font-weight: bold; }
-      .log-gl { color: #c084fc; }
       .log-net { color: #fb923c; }
     </style>
   </head>
@@ -152,20 +70,18 @@
       </div>
 
       <div class="control-group">
-        <label title="Select your Prism Launcher libraries/ folder ONCE — it saves permanently to IndexedDB!">
-          Save Prism `libraries/` to DB:
-        </label>
+        <label>Save Prism `libraries/` to DB:</label>
         <input type="file" id="prism-libs-input" webkitdirectory directory multiple style="width:155px; font-size:11px;">
       </div>
 
       <div class="control-group">
-        <label title="Upload Mod JARs — saved permanently in IndexedDB!">Save Mods (.jar) to DB:</label>
+        <label>Save Mods (.jar) to DB:</label>
         <input type="file" id="mod-upload" multiple accept=".jar" style="width:135px; font-size:11px;">
       </div>
 
       <div id="db-stats">IndexedDB: Checking...</div>
 
-      <button id="clear-cache-btn" class="btn btn-secondary" title="Clear cached libraries & mods in IndexedDB (keeps Worlds)">Clear Lib/Mod DB</button>
+      <button id="clear-cache-btn" class="btn btn-secondary">Clear Lib/Mod DB</button>
       <button id="start-btn" class="btn" disabled>Boot 1.20.1 Engine</button>
 
       <div id="status-banner">Initializing CheerpJ 4.2...</div>
@@ -181,9 +97,9 @@
     </div>
 
     <script type="module">
-      import MinecraftClient from "./minecraft-web.js?v=1201_v4";
-      import lwjglNatives from "./natives/lwjgl.js?v=1201_v4";
-      import netlibNatives from "./natives/netlib.js?v=1201_v4";
+      import MinecraftClient from "./minecraft-web.js?v=1201_v5";
+      import lwjglNatives from "./natives/lwjgl.js?v=1201_v5";
+      import netlibNatives from "./natives/netlib.js?v=1201_v5";
 
       const consolePane = document.getElementById("console-pane");
       const statusBanner = document.getElementById("status-banner");
@@ -209,32 +125,30 @@
       }
 
       window.webforgeLog = log;
-
-      const origLog = console.log;
-      const origWarn = console.warn;
-      const origErr = console.error;
+      const origLog = console.log, origWarn = console.warn, origErr = console.error;
       console.log = (...a) => { log(a.join(" "), "info"); origLog(...a); };
       console.warn = (...a) => { log(a.join(" "), "warn"); origWarn(...a); };
       console.error = (...a) => { log(a.join(" "), "err"); origErr(...a); };
 
       if (navigator.storage && navigator.storage.persist) {
-        navigator.storage.persist().then(persisted => {
-          log(`Browser Persistent IndexedDB Storage (Worlds, Saves, Libs, Mods): ${persisted ? "LOCKED & PERSISTENT" : "ACTIVE"}`, "glfw");
-        });
+        navigator.storage.persist().catch(() => {});
       }
 
-      const combinedNatives = Object.assign({}, lwjglNatives, netlibNatives);
+      const rawNatives = Object.assign({}, lwjglNatives, netlibNatives);
+      const combinedNatives = lwjglNatives.__createStrictLWJGLProxy
+        ? lwjglNatives.__createStrictLWJGLProxy(rawNatives, log)
+        : rawNatives;
       const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
       async function refreshDBStats() {
         if (typeof mcElement.getStorageSummary === "function") {
-          const summary = await mcElement.getStorageSummary();
-          dbStats.textContent = `DB Saved: ${summary.prismLibs} Prism Libs | ${summary.cloudLibs} Cloud Libs | ${summary.mods} Mods | Worlds: /files/game/saves`;
+          const s = await mcElement.getStorageSummary();
+          dbStats.textContent = `DB: ${s.prismLibs} Prism | ${s.cloudLibs} Cloud | ${s.mods} Mods | Worlds: /files/game/saves`;
         }
       }
 
       try {
-        log("Booting CheerpJ 4.2 (OpenJDK 17) with explicit LWJGL 3.3.1 Native Table (v4)...", "glfw");
+        log("Booting CheerpJ 4.2 (OpenJDK 17) + LWJGL 3 Bridge (v5)...", "glfw");
         await cheerpjInit({
           version: 17,
           status: "none",
@@ -251,15 +165,13 @@
             "org.lwjgl.util.DebugLoader=true",
             "org.lwjgl.system.allocator=system",
             "org.lwjgl.glfw.checkThread0=false",
-            "java.awt.headless=false",
+            "java.awt.headless=true",
             "fml.earlyprogresswindow=false",
             "fml.ignoreInvalidMinecraftCertificates=true",
             "fml.ignorePatchDiscrepancies=true"
           ]
         });
 
-        // Write safe Log4j2 config into /str/log4j2.xml that uses %ex (ThrowablePatternConverter)
-        // instead of %xEx / %tEx (which crash calling SecurityManager.getClassContext)
         const safeLog4jXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="OFF">
   <Appenders>
@@ -280,11 +192,10 @@
 
         statusBanner.textContent = "JVM 17 Ready.";
         statusBanner.style.color = "#00e676";
-        log("CheerpJ 17, /str/log4j2.xml, & LWJGL 3 Bridge (v4) Ready.", "glfw");
+        log("CheerpJ 17 Ready. Waiting to launch.", "glfw");
         startBtn.disabled = false;
       } catch (err) {
         log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
-        statusBanner.textContent = "Init Failed";
       }
 
       prismLibsInput.addEventListener("change", async () => {
@@ -297,9 +208,6 @@
             statusBanner.textContent = msg;
           }, log);
           await refreshDBStats();
-          statusBanner.textContent = "Prism Libraries Saved to DB!";
-        } catch (e) {
-          log(`Failed saving Prism libraries to DB: ${e.message}`, "err");
         } finally {
           startBtn.disabled = false;
         }
@@ -308,45 +216,32 @@
       modUploadInput.addEventListener("change", async () => {
         const files = Array.from(modUploadInput.files || []);
         if (!files.length) return;
-        startBtn.disabled = true;
-        try {
-          await mcElement.saveModsToDB(files, log);
-          await refreshDBStats();
-          statusBanner.textContent = "Mods Saved to DB!";
-        } catch (e) {
-          log(`Failed saving mods to DB: ${e.message}`, "err");
-        } finally {
-          startBtn.disabled = false;
-        }
+        await mcElement.saveModsToDB(files, log);
+        await refreshDBStats();
       });
 
       clearCacheBtn.addEventListener("click", async () => {
         await mcElement.clearLibraryCache();
         await refreshDBStats();
-        log("Cleared cached Libraries and Mods from IndexedDB (Your Worlds in /files/game/saves are untouched).", "warn");
+        log("Cleared Lib/Mod IndexedDB cache.", "warn");
       });
 
       startBtn.addEventListener("click", async () => {
         startBtn.disabled = true;
-        const mode = launchModeSelect.value;
-        const username = usernameInput.value || "Player";
-
         try {
-          await mcElement.run1201({
-            mode,
-            username,
-            onProgress(pct, statusMsg) {
+          const code = await mcElement.run1201({
+            mode: launchModeSelect.value,
+            username: usernameInput.value || "Player",
+            onProgress(pct, msg) {
               progressFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
-              if (statusMsg) statusBanner.textContent = statusMsg;
+              if (msg) statusBanner.textContent = msg;
             },
             log
           });
-          await refreshDBStats();
+          log(`JVM main thread returned with code: ${code}`, "warn");
         } catch (err) {
           log(`EXECUTION HALTED: ${err.message || err}`, "err");
           if (err.stack) log(err.stack, "err");
-          statusBanner.textContent = "Execution Halted";
-          statusBanner.style.color = "#f87171";
           startBtn.disabled = false;
         }
       });
