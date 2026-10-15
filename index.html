@@ -97,9 +97,9 @@
     </div>
 
     <script type="module">
-      import MinecraftClient from "./minecraft-web.js?v=1201_v5";
-      import lwjglNatives from "./natives/lwjgl.js?v=1201_v5";
-      import netlibNatives from "./natives/netlib.js?v=1201_v5";
+      import MinecraftClient from "./minecraft-web.js?v=1201_v6";
+      import lwjglNatives from "./natives/lwjgl.js?v=1201_v6";
+      import netlibNatives from "./natives/netlib.js?v=1201_v6";
 
       const consolePane = document.getElementById("console-pane");
       const statusBanner = document.getElementById("status-banner");
@@ -138,7 +138,6 @@
       const combinedNatives = lwjglNatives.__createStrictLWJGLProxy
         ? lwjglNatives.__createStrictLWJGLProxy(rawNatives, log)
         : rawNatives;
-      const nativesPath = `/app${new URL("natives", import.meta.url).pathname}`;
 
       async function refreshDBStats() {
         if (typeof mcElement.getStorageSummary === "function") {
@@ -148,14 +147,15 @@
       }
 
       try {
-        log("Booting CheerpJ 4.2 (OpenJDK 17) + LWJGL 3 Bridge (v5)...", "glfw");
+        log("Booting CheerpJ 4.2 (OpenJDK 17) + LWJGL 3 Bridge (v6)...", "glfw");
         await cheerpjInit({
           version: 17,
           status: "none",
           disableMetrics: true,
           natives: combinedNatives,
           javaProperties: [
-            `java.library.path=${nativesPath}`,
+            "java.library.path=/str",
+            "org.lwjgl.librarypath=/str",
             "log4j.configurationFile=/str/log4j2.xml",
             "log4j2.configurationFile=/str/log4j2.xml",
             "log4j.skipJansi=true",
@@ -172,6 +172,7 @@
           ]
         });
 
+        // 1. Mount safe Log4j2 XML configuration
         const safeLog4jXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="OFF">
   <Appenders>
@@ -187,12 +188,38 @@
 </Configuration>`;
         cheerpOSAddStringFile("/str/log4j2.xml", new TextEncoder().encode(safeLog4jXml));
 
+        // 2. Mount LWJGL 3 native library markers into /str/ so Library.loadSystem finds them immediately
+        const dummyNativeBytes = new TextEncoder().encode("export default {};");
+        const nativeMarkers = [
+          "/str/lwjgl.js",
+          "/str/liblwjgl.so",
+          "/str/lwjgl_opengl.js",
+          "/str/liblwjgl_opengl.so",
+          "/str/lwjgl_stb.js",
+          "/str/liblwjgl_stb.so",
+          "/str/lwjgl_jemalloc.js",
+          "/str/liblwjgl_jemalloc.so",
+          "/str/lwjgl_tinyfd.js",
+          "/str/libglfw.so",
+          "/str/glfw.js",
+          "/str/libopenal.so",
+          "/str/openal.js",
+          "/str/libGL.so.1",
+          "/str/libGL.so",
+          "/str/libjemalloc.so.2",
+          "/str/jawt.js",
+          "/str/netlib.js"
+        ];
+        for (const path of nativeMarkers) {
+          cheerpOSAddStringFile(path, dummyNativeBytes);
+        }
+
         MinecraftClient.register();
         await refreshDBStats();
 
         statusBanner.textContent = "JVM 17 Ready.";
         statusBanner.style.color = "#00e676";
-        log("CheerpJ 17 Ready. Waiting to launch.", "glfw");
+        log("CheerpJ 17 Ready (/str/lwjgl.js native markers mounted). Waiting to launch.", "glfw");
         startBtn.disabled = false;
       } catch (err) {
         log(`FATAL JVM INIT ERROR: ${err.message || err}`, "err");
