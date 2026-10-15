@@ -1,8 +1,11 @@
 // ============================================================================
-// WebForge Unified LWJGL 3.3.1 Engine (v6)
-// Includes Java 17 NativeLibraries.load Bridge (Fixes JVM_LoadLibrary),
-// Shared Wasm Linear Heap Arena, GLFW 3.3.8, WebGL 2 Core (GLSL 150 -> 300 es),
-// Async STBImage Texture Decoder, and OpenAL 1.1
+// WebForge Unified LWJGL 3.3.1 Engine (v7)
+// Includes:
+// - JNINativeInterface.nNewDirectByteBuffer (Constructs real DirectByteBuffer
+//   instances for LWJGL 3 MemoryUtil.<clinit> magic-offset calibration)
+// - OpenJDK 17 NativeLibraries.load Bridge
+// - 16 MB Shared Wasm Linear Heap Arena
+// - GLFW 3.3.8 + WebGL 2 Core (GLSL 150 -> 300 es) + Async STBImage + OpenAL
 // ============================================================================
 
 await import("https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/3.4.2/gl-matrix-min.js");
@@ -150,7 +153,7 @@ function ensureGLContext() {
 }
 
 // ============================================================================
-// 1. Shared Wasm Linear Memory & Off-Heap Arena Manager
+// 1. Shared Wasm Linear Memory & DirectByteBuffer Calibration Manager
 // ============================================================================
 class WasmHeapMemoryManager {
   constructor() {
@@ -163,6 +166,14 @@ class WasmHeapMemoryManager {
     this.scratchStringPtrs = new Map();
     this.rawBuffer = null;
     this.heapView = null;
+
+    // DirectByteBuffer reflection/field-key calibration cache
+    this.dbbCalibrated = false;
+    this.capacityKey = null;
+    this.limitKey = null;
+    this.positionKey = null;
+    this.markKey = null;
+    this.addressKey = null;
   }
 
   getDataView(lib) {
@@ -172,8 +183,8 @@ class WasmHeapMemoryManager {
         if (v && v.buffer !== this.rawBuffer) {
           this.rawBuffer = v.buffer;
           this.heapView = new Uint8Array(v.buffer);
-          if (this.wasmArenaPtr === 0 && v.byteLength >= 0x00800000) {
-            this.wasmArenaPtr = (Math.max(0x00600000, v.byteLength - 0x00400000) + 15) & ~15;
+          if (this.wasmArenaPtr === 0 && v.byteLength >= 0x00200000) {
+            this.wasmArenaPtr = (Math.floor(v.byteLength * 0.55) + 15) & ~15;
             this.wasmArenaEnd = v.byteLength - 65536;
           }
         }
@@ -181,6 +192,53 @@ class WasmHeapMemoryManager {
       } catch (_) {}
     }
     return null;
+  }
+
+  async calibrateDirectByteBufferLayout(lib) {
+    if (this.dbbCalibrated) return;
+    this.dbbCalibrated = true;
+
+    try {
+      const ByteBuffer = await lib.java.nio.ByteBuffer;
+      const probe1 = await ByteBuffer.allocateDirect(0x1234);
+      await probe1.limit(0x0567);
+      await probe1.position(0x0123);
+      await probe1.mark();
+
+      // Allocate a persistent 16 MB native Wasm slab via OpenJDK 17's own Unsafe.allocateMemory
+      const slabSize = 16 * 1024 * 1024;
+      const slabBuf = await ByteBuffer.allocateDirect(slabSize);
+      window.__webforgeWasmSlab = slabBuf;
+
+      const keys = Reflect.ownKeys(probe1);
+      for (const k of keys) {
+        const v1 = probe1[k];
+        const v2 = slabBuf[k];
+        if (v1 === 0x1234 && v2 === slabSize) {
+          this.capacityKey = k;
+        } else if (v1 === 0x0567 && v2 === slabSize) {
+          this.limitKey = k;
+        } else if (v1 === 0x0123 && v2 === 0) {
+          this.positionKey = k;
+        } else if (v1 === 0x0123 && v2 === -1) {
+          this.markKey = k;
+        } else if ((typeof v1 === "bigint" || typeof v1 === "number") && v1 !== v2 && v1 !== 0 && v1 !== 0n) {
+          this.addressKey = k;
+        }
+      }
+
+      if (this.addressKey !== null) {
+        const slabAddr = Number(slabBuf[this.addressKey]);
+        if (slabAddr > 0) {
+          this.wasmArenaPtr = (slabAddr + 64) & ~15;
+          this.wasmArenaEnd = slabAddr + slabSize - 1024;
+          window.webforgeLog?.(`[WasmArena] Locked 16 MB native Wasm arena at 0x${this.wasmArenaPtr.toString(16)}`, "glfw");
+        }
+      }
+      window.webforgeLog?.(`[DirectByteBuffer] Calibrated field keys: addr=${String(this.addressKey)}, cap=${String(this.capacityKey)}, lim=${String(this.limitKey)}`, "glfw");
+    } catch (err) {
+      console.warn("[DirectByteBuffer] Calibration notice:", err);
+    }
   }
 
   malloc(lib, size) {
@@ -1523,7 +1581,7 @@ const alDispatch = {
 };
 
 // ============================================================================
-// 7. Explicit Export Table + OpenJDK 17 NativeLibraries Bridge
+// 7. Explicit Export Table + JNINativeInterface DirectByteBuffer Builder
 // ============================================================================
 const jniInvokeHandler = function(lib, ...args) {
   const funcPtr = args[args.length - 1];
@@ -1534,13 +1592,71 @@ const jniInvokeHandler = function(lib, ...args) {
 let cachedJniEnvStructPtr = 0;
 
 const baseExports = {
-  // CRITICAL FIX: Intercepts OpenJDK 17's NativeLibraries.load so LWJGL 3's
-  // System.load("/str/lwjgl.js") succeeds immediately without calling JVM_LoadLibrary!
+  // OpenJDK 17 NativeLibraries.load Bridge
   Java_jdk_internal_loader_NativeLibraries_load(lib, impl, nameObj, isBuiltin, isJNI, throwExceptionIfFail) {
     return 1; // JNI_TRUE
   },
   Java_jdk_internal_loader_NativeLibraries_unload(lib, nameObj, isBuiltin, isJNI, handle) {
   },
+
+  // JNINativeInterface (Constructs real DirectByteBuffer instances for LWJGL 3 MemoryUtil)
+  Java_org_lwjgl_system_jni_JNINativeInterface_GetVersion: () => 0x00010008,
+  async Java_org_lwjgl_system_jni_JNINativeInterface_nNewDirectByteBuffer(lib, address, capacity) {
+    await mem.calibrateDirectByteBufferLayout(lib);
+
+    const capInt = Number(capacity) | 0;
+    const addrBig = typeof address === "bigint"
+      ? BigInt.asIntN(64, address)
+      : BigInt.asIntN(64, BigInt(Math.trunc(Number(address) || 0)));
+
+    // 1. Try OpenJDK 17's DirectByteBuffer(long addr, int cap) constructor directly
+    try {
+      const DirectByteBuffer = await lib.java.nio.DirectByteBuffer;
+      const dbb = await new DirectByteBuffer(addrBig, capInt);
+      if (dbb) return dbb;
+    } catch (_) {}
+
+    // 2. Fallback: Allocate a 0-byte DirectByteBuffer via ByteBuffer.allocateDirect(0)
+    // and set its calibrated capacity, limit, position, mark, and address fields directly
+    const ByteBuffer = await lib.java.nio.ByteBuffer;
+    const dbb = await ByteBuffer.allocateDirect(0);
+    if (mem.capacityKey !== null) dbb[mem.capacityKey] = capInt;
+    if (mem.limitKey !== null) dbb[mem.limitKey] = capInt;
+    if (mem.positionKey !== null) dbb[mem.positionKey] = 0;
+    if (mem.markKey !== null) dbb[mem.markKey] = -1;
+    if (mem.addressKey !== null) {
+      if (typeof dbb[mem.addressKey] === "bigint") {
+        dbb[mem.addressKey] = addrBig;
+      } else {
+        dbb[mem.addressKey] = Number(addrBig & 0xFFFFFFFFn) | 0;
+      }
+    }
+    return dbb;
+  },
+  Java_org_lwjgl_system_jni_JNINativeInterface_GetDirectBufferAddress(lib, buf) {
+    if (!buf) return 0;
+    if (mem.addressKey !== null && buf[mem.addressKey] !== undefined) {
+      return Number(buf[mem.addressKey]);
+    }
+    return 0;
+  },
+  Java_org_lwjgl_system_jni_JNINativeInterface_GetDirectBufferCapacity(lib, buf) {
+    if (!buf) return 0;
+    if (mem.capacityKey !== null && buf[mem.capacityKey] !== undefined) {
+      return Number(buf[mem.capacityKey]);
+    }
+    return 0;
+  },
+  Java_org_lwjgl_system_jni_JNINativeInterface_NewGlobalRef: () => 1,
+  Java_org_lwjgl_system_jni_JNINativeInterface_nDeleteGlobalRef: () => {},
+  Java_org_lwjgl_system_jni_JNINativeInterface_DeleteGlobalRef: () => {},
+  Java_org_lwjgl_system_jni_JNINativeInterface_NewWeakGlobalRef: () => 1,
+  Java_org_lwjgl_system_jni_JNINativeInterface_nDeleteWeakGlobalRef: () => {},
+  Java_org_lwjgl_system_jni_JNINativeInterface_DeleteWeakGlobalRef: () => {},
+  Java_org_lwjgl_system_jni_JNINativeInterface_FromReflectedMethod: () => 1,
+  Java_org_lwjgl_system_jni_JNINativeInterface_FromReflectedField: () => 1,
+  Java_org_lwjgl_system_jni_JNINativeInterface_ToReflectedMethod: () => null,
+  Java_org_lwjgl_system_jni_JNINativeInterface_ToReflectedField: () => null,
 
   Java_org_lwjgl_system_SharedLibraryUtil_getLibraryPath: () => 0,
 
